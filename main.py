@@ -498,6 +498,12 @@ class App:
 
         self.detect_history = deque(maxlen=3)
 
+        self.cooldown_active = False
+        self.cooldown_until = 0
+        self.cooldown_reason = ""
+        self.COOLDOWN_SEC = 600
+        self.RECOVERY_TOL = 0.15
+
         self.bg = "#101820"
         self.card = "#182632"
         self.text = "#EAF2F8"
@@ -577,9 +583,12 @@ class App:
         self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=12, pady=8)
 
     # -----------------------------------------------------
-    # SIMPLE POPUP MENUS
+    # POPUP MENUS
     # -----------------------------------------------------
     def open_learn_menu(self):
+        if self.is_blocked_by_cooldown(show_message=True):
+            return
+
         win = tk.Toplevel(self.root)
         win.title("학습 선택")
         win.geometry("360x260")
@@ -613,6 +622,9 @@ class App:
             ).pack(fill="x", padx=28, pady=6)
 
     def open_detect_menu(self):
+        if self.is_blocked_by_cooldown(show_message=True):
+            return
+
         win = tk.Toplevel(self.root)
         win.title("판별 선택")
         win.geometry("390x260")
@@ -664,10 +676,15 @@ class App:
         save_state = f"AIR기준 {self.baseline_save_count}회"
         learn_state = f"AIR {counts['AIR']} / ETH {counts['ETHANOL']} / IPA {counts['IPA']}"
 
+        cooldown_text = ""
+        if self.cooldown_active:
+            remain = max(0, int(self.cooldown_until - time.time()))
+            cooldown_text = f" | 쿨타임 {remain // 60:02d}:{remain % 60:02d}"
+
         if text:
-            msg = f"상태: {text} | {detect_state} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
+            msg = f"상태: {text}{cooldown_text} | {detect_state} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
         else:
-            msg = f"상태: {detect_state} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
+            msg = f"상태: {detect_state}{cooldown_text} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
 
         self.status_label.config(text=msg)
 
@@ -676,11 +693,16 @@ class App:
         self.root.attributes("-fullscreen", self.fullscreen)
 
     def toggle_auto(self):
+        if self.cooldown_active:
+            messagebox.showinfo("쿨타임 중", "시료 잔류 제거 쿨타임 중에는 AIR 기준 기록을 켤 수 없습니다.")
+            self.auto_baseline = False
+            self.update_status()
+            return
+
         if self.realtime_detect:
             messagebox.showinfo(
                 "안내",
-                "실시간 판별 중에는 AIR 기준 기록을 켤 수 없습니다.\n"
-                "먼저 실시간 판별을 끄세요."
+                "실시간 판별 중에는 AIR 기준 기록을 켤 수 없습니다.\n먼저 실시간 판별을 끄세요."
             )
             self.auto_baseline = False
         else:
@@ -689,6 +711,9 @@ class App:
         self.update_status()
 
     def toggle_realtime(self):
+        if self.is_blocked_by_cooldown(show_message=True):
+            return
+
         self.realtime_detect = not self.realtime_detect
 
         if self.realtime_detect:
@@ -703,9 +728,105 @@ class App:
             self.update_status("실시간 판별 OFF")
 
     # -----------------------------------------------------
+    # COOLDOWN
+    # -----------------------------------------------------
+    def start_cooldown(self, reason):
+        self.cooldown_active = True
+        self.cooldown_until = time.time() + self.COOLDOWN_SEC
+        self.cooldown_reason = reason
+
+        self.auto_baseline = False
+        self.realtime_detect = False
+        self.baseline_buffer = []
+        self.detect_history.clear()
+
+        self.cards["현재상태"].config(text="시료 잔류 제거 대기", fg="#FFD166")
+        self.cards["판별확률"].config(text="-")
+
+        self.update_status(f"{reason} 후 쿨타임 시작 / 학습·판별·AIR기준 기록 잠금")
+
+    def is_air_recovered(self):
+        if not self.latest_air_gas:
+            baselines = load_csv(BASELINE_CSV)
+            if baselines:
+                try:
+                    self.latest_air_gas = float(baselines[-1].get("gas_avg", 0))
+                except Exception:
+                    self.latest_air_gas = None
+
+        if not self.latest_air_gas:
+            return False
+
+        rows = list(self.current_rows)[-40:]
+        gas = [r["gas_ohm"] for r in rows if r["gas_ohm"] > 0]
+
+        if len(gas) < 20:
+            return False
+
+        avg_gas = mean(gas)
+        diff_ratio = abs(avg_gas - self.latest_air_gas) / self.latest_air_gas
+
+        return diff_ratio <= self.RECOVERY_TOL
+
+    def check_cooldown_release(self):
+        if not self.cooldown_active:
+            return
+
+        remain = int(self.cooldown_until - time.time())
+
+        if remain > 0:
+            self.update_status(f"시료 잔류 제거 대기중")
+            return
+
+        if self.is_air_recovered():
+            self.cooldown_active = False
+            self.cooldown_reason = ""
+            self.auto_baseline = True
+            self.baseline_buffer = []
+            self.cards["현재상태"].config(text="회복 완료 / AIR 기록 가능", fg="#4DFF88")
+            self.update_status("회복 완료 / 자동 AIR 기준 기록 재개")
+        else:
+            self.auto_baseline = False
+            self.cards["현재상태"].config(text="쿨타임 종료 / 아직 미회복", fg="#FFD166")
+            self.update_status("쿨타임 종료 / AIR 기준 범위 미회복")
+
+    def is_blocked_by_cooldown(self, show_message=False):
+        if not self.cooldown_active:
+            return False
+
+        remain = max(0, int(self.cooldown_until - time.time()))
+
+        if remain > 0:
+            if show_message:
+                messagebox.showinfo(
+                    "쿨타임 중",
+                    f"시료 잔류 제거 대기중입니다.\n"
+                    f"남은 시간: {remain // 60}분 {remain % 60}초\n\n"
+                    f"이 시간 동안 학습/판별/자동 AIR 기록이 차단됩니다."
+                )
+            return True
+
+        if not self.is_air_recovered():
+            if show_message:
+                messagebox.showinfo(
+                    "회복 대기",
+                    "쿨타임은 끝났지만 아직 AIR 기준 범위로 회복되지 않았습니다.\n"
+                    "환기 후 다시 시도하세요."
+                )
+            return True
+
+        self.cooldown_active = False
+        self.auto_baseline = True
+        self.update_status("회복 완료 / 자동 AIR 기준 기록 재개")
+        return False
+
+    # -----------------------------------------------------
     # SAMPLING
     # -----------------------------------------------------
     def start_sample(self, label):
+        if self.is_blocked_by_cooldown(show_message=True):
+            return
+
         self.realtime_detect = False
         self.auto_baseline = False
         self.baseline_buffer = []
@@ -719,6 +840,9 @@ class App:
         self.update_status(f"{label} 학습 준비 5초 / AIR 기준 기록 일시정지")
 
     def start_unknown(self):
+        if self.is_blocked_by_cooldown(show_message=True):
+            return
+
         self.realtime_detect = False
         self.auto_baseline = False
         self.baseline_buffer = []
@@ -739,10 +863,13 @@ class App:
             self.sample_mode = None
             return
 
+        finished_label = self.pending_label
+        finished_mode = self.sample_mode
+
         if self.sample_mode == "LEARN":
             save_dict_csv(SAMPLES_CSV, feature)
-            self.cards["현재상태"].config(text=f"{self.pending_label} 학습완료", fg="#4DFF88")
-            self.update_status(f"{self.pending_label} 학습 저장 완료")
+            self.cards["현재상태"].config(text=f"{finished_label} 학습완료", fg="#4DFF88")
+            self.update_status(f"{finished_label} 학습 저장 완료")
         else:
             pct, winner = classify(feature)
             self.cards["현재상태"].config(text=f"{winner}", fg="#FFD166")
@@ -755,6 +882,12 @@ class App:
         self.pending_label = None
         self.sample_rows = []
         self.sample_phase = None
+
+        if finished_label in ["ETHANOL", "IPA", "UNKNOWN"]:
+            self.start_cooldown(finished_label)
+        elif finished_label == "AIR":
+            self.auto_baseline = True
+            self.update_status("AIR 학습 완료 / 자동 AIR 기준 기록 재개")
 
     # -----------------------------------------------------
     # REALTIME CLASSIFY
@@ -1042,8 +1175,11 @@ class App:
 
                 save_dict_csv(RAW_CSV, row)
 
+                self.check_cooldown_release()
+
                 can_record_air_baseline = (
                     self.auto_baseline
+                    and not self.cooldown_active
                     and not self.realtime_detect
                     and self.sample_mode is None
                     and row["gas_valid"]
@@ -1097,7 +1233,7 @@ class App:
                             self.update_status(f"{self.pending_label} 회복중 {remain}초")
 
                 else:
-                    if self.realtime_detect:
+                    if self.realtime_detect and not self.cooldown_active:
                         self.run_realtime_detect()
 
                     self.update_status()
