@@ -4,12 +4,10 @@ from collections import deque
 import spidev
 import matplotlib.pyplot as plt
 
-
 spi = spidev.SpiDev()
 spi.open(0, 0)
 spi.max_speed_hz = 50000
 spi.mode = 0
-
 
 REG_CHIP_ID = 0xD0
 REG_RESET = 0xE0
@@ -36,10 +34,13 @@ def write_reg_raw(reg, value):
 def set_mem_page(reg):
     status = read_reg_raw(REG_STATUS)
 
+    # Observed on your sensor:
+    # high registers like 0xD0 work with bit4 = 0
+    # low registers like 0x5A, 0x64, 0x71 need bit4 = 1
     if reg < 0x80:
-        status &= ~0x10
-    else:
         status |= 0x10
+    else:
+        status &= ~0x10
 
     write_reg_raw(REG_STATUS, status)
     time.sleep(0.001)
@@ -79,7 +80,6 @@ def sensor_init():
     write_reg(REG_CONFIG, 0x08)
     write_reg(REG_CTRL_HUM, 0x01)
 
-    # Gas heater test setting
     write_reg(REG_RES_HEAT_0, 0x73)
     write_reg(REG_GAS_WAIT_0, 0x59)
 
