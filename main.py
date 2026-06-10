@@ -1,15 +1,9 @@
-import board
-import digitalio
-import adafruit_bme680
+import spidev
 
-spi = board.SPI()
+spi = spidev.SpiDev()
+spi.open(0, 0)
+spi.max_speed_hz = 50000
+spi.mode = 0
 
-for ce in [board.CE0, board.CE1]:
-    try:
-        cs = digitalio.DigitalInOut(ce)
-        sensor = adafruit_bme680.Adafruit_BME680_SPI(spi, cs)
-        print("OK:", ce)
-        print("Temp:", sensor.temperature)
-        break
-    except Exception as e:
-        print("Fail:", ce, e)
+print(spi.xfer2([0x00]))
+print(spi.xfer2([0xD0, 0x00]))  # chip id 읽기 시도
