@@ -3,26 +3,24 @@ import time
 from collections import deque
 
 import spidev
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
 
-# Optional: reduce Qt/Wayland warnings
 os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
 
+# Korean font
+matplotlib.rcParams["font.family"] = "NanumGothic"
+matplotlib.rcParams["axes.unicode_minus"] = False
 
-# =========================
-# SPI SETUP
-# =========================
+
 spi = spidev.SpiDev()
-spi.open(0, 0)          # SPI0 CE0
+spi.open(0, 0)
 spi.max_speed_hz = 50000
 spi.mode = 0
 
 
-# =========================
-# REGISTERS
-# =========================
 REG_CHIP_ID = 0xD0
 REG_RESET = 0xE0
 REG_STATUS = 0x73
@@ -36,13 +34,9 @@ REG_CONFIG = 0x75
 REG_RES_HEAT_0 = 0x5A
 REG_GAS_WAIT_0 = 0x64
 REG_FIELD0 = 0x1D
-
 REG_RANGE_SW_ERR = 0x04
 
 
-# =========================
-# COLORS
-# =========================
 BG = "#101820"
 CARD = "#182632"
 GRID = "#314452"
@@ -55,9 +49,6 @@ C_HUM = "#4DFF88"
 C_PRESS = "#FFD166"
 
 
-# =========================
-# SPI LOW LEVEL
-# =========================
 def read_reg_raw(reg):
     return spi.xfer2([reg | 0x80, 0x00])[1]
 
@@ -69,9 +60,6 @@ def write_reg_raw(reg, value):
 def set_mem_page(reg):
     status = read_reg_raw(REG_STATUS)
 
-    # Your sensor behavior:
-    # reg < 0x80 needs page bit 4 = 1
-    # reg >= 0x80 needs page bit 4 = 0
     if reg < 0x80:
         status |= 0x10
     else:
@@ -109,9 +97,6 @@ def s8(v):
     return v - 256 if v & 0x80 else v
 
 
-# =========================
-# CALIBRATION
-# =========================
 cal = {}
 t_fine = 0.0
 
@@ -167,8 +152,8 @@ def compensate_temp(temp_adc):
 
     var1 = ((temp_adc / 16384.0) - (cal["par_t1"] / 1024.0)) * cal["par_t2"]
     var2 = (((temp_adc / 131072.0) - (cal["par_t1"] / 8192.0)) ** 2) * (cal["par_t3"] * 16.0)
-
     t_fine = var1 + var2
+
     return t_fine / 5120.0
 
 
@@ -192,7 +177,7 @@ def compensate_pressure(press_adc):
     var3 = (pressure / 256.0) ** 3 * (cal["par_p10"] / 131072.0)
 
     pressure = pressure + (var1 + var2 + var3 + (cal["par_p7"] * 128.0)) / 16.0
-    return pressure / 100.0  # hPa
+    return pressure / 100.0
 
 
 def compensate_humidity(hum_adc, temp_c):
@@ -222,9 +207,6 @@ def calc_gas_resistance(gas_adc, gas_range):
     return var3 / var2
 
 
-# =========================
-# SENSOR
-# =========================
 def sensor_reset():
     write_reg(REG_RESET, 0xB6)
     time.sleep(0.2)
@@ -279,12 +261,9 @@ def read_raw_data():
     return new_data, temp_adc, pressure_adc, hum_adc, gas_adc, gas_range, gas_valid, heat_stable
 
 
-# =========================
-# UI
-# =========================
 def style_axis(ax):
     ax.set_facecolor(CARD)
-    ax.tick_params(colors=MUTED)
+    ax.tick_params(colors=MUTED, labelsize=9)
     ax.xaxis.label.set_color(MUTED)
     ax.yaxis.label.set_color(MUTED)
     ax.title.set_color(TEXT)
@@ -298,12 +277,14 @@ def draw_card(ax, title, value, unit, color, sub=""):
     ax.set_facecolor(CARD)
     ax.set_xticks([])
     ax.set_yticks([])
+
     for spine in ax.spines.values():
         spine.set_color(GRID)
 
     ax.text(0.05, 0.78, title, color=MUTED, fontsize=11, transform=ax.transAxes)
-    ax.text(0.05, 0.35, value, color=color, fontsize=24, fontweight="bold", transform=ax.transAxes)
+    ax.text(0.05, 0.35, value, color=color, fontsize=23, fontweight="bold", transform=ax.transAxes)
     ax.text(0.05, 0.12, unit, color=MUTED, fontsize=10, transform=ax.transAxes)
+
     if sub:
         ax.text(0.95, 0.12, sub, color=MUTED, fontsize=9, ha="right", transform=ax.transAxes)
 
@@ -317,10 +298,17 @@ hum_values = deque(maxlen=300)
 press_values = deque(maxlen=300)
 
 plt.ion()
-fig = plt.figure(figsize=(14, 8), facecolor=BG)
-fig.canvas.manager.set_window_title("BME688 Live Dashboard")
+fig = plt.figure(figsize=(15, 8.5), facecolor=BG)
+fig.canvas.manager.set_window_title("BME688 실시간 대시보드")
 
-gs = gridspec.GridSpec(3, 4, figure=fig, height_ratios=[1.0, 2.0, 1.6], hspace=0.45, wspace=0.25)
+gs = gridspec.GridSpec(
+    3,
+    4,
+    figure=fig,
+    height_ratios=[1.05, 2.3, 1.7],
+    hspace=0.55,
+    wspace=0.35,
+)
 
 ax_card_gas = fig.add_subplot(gs[0, 0])
 ax_card_temp = fig.add_subplot(gs[0, 1])
@@ -328,8 +316,9 @@ ax_card_hum = fig.add_subplot(gs[0, 2])
 ax_card_press = fig.add_subplot(gs[0, 3])
 
 ax_gas = fig.add_subplot(gs[1, :])
-ax_temp = fig.add_subplot(gs[2, 0:2])
-ax_env = fig.add_subplot(gs[2, 2:4])
+ax_temp = fig.add_subplot(gs[2, 0])
+ax_hum = fig.add_subplot(gs[2, 1])
+ax_press = fig.add_subplot(gs[2, 2:4])
 
 start_time = time.time()
 
@@ -357,7 +346,7 @@ try:
         hum_values.append(hum_pct)
         press_values.append(press_hpa)
 
-        status = "OK" if gas_valid and heat_stable else "WARMUP"
+        status = "정상" if gas_valid and heat_stable else "예열중"
 
         print(
             f"{now:7.1f}s | "
@@ -368,40 +357,41 @@ try:
             f"ADC={gas_adc:4d} | RANGE={gas_range:2d} | {status}"
         )
 
-        draw_card(ax_card_gas, "GAS RESISTANCE", f"{gas_ohm:,.0f}", "ohm", C_GAS, status)
-        draw_card(ax_card_temp, "TEMPERATURE", f"{temp_c:.2f}", "deg C", C_TEMP)
-        draw_card(ax_card_hum, "HUMIDITY", f"{hum_pct:.1f}", "% RH", C_HUM)
-        draw_card(ax_card_press, "PRESSURE", f"{press_hpa:.2f}", "hPa", C_PRESS)
+        draw_card(ax_card_gas, "가스 저항", f"{gas_ohm:,.0f}", "Ω", C_GAS, status)
+        draw_card(ax_card_temp, "온도", f"{temp_c:.2f}", "°C", C_TEMP)
+        draw_card(ax_card_hum, "습도", f"{hum_pct:.1f}", "% RH", C_HUM)
+        draw_card(ax_card_press, "기압", f"{press_hpa:.2f}", "hPa", C_PRESS)
 
         ax_gas.clear()
         style_axis(ax_gas)
-        ax_gas.plot(times, gas_values, color=C_GAS, linewidth=2.4)
-        ax_gas.fill_between(times, gas_values, color=C_GAS, alpha=0.12)
-        ax_gas.set_title("Gas Resistance Response")
-        ax_gas.set_xlabel("Time sec")
-        ax_gas.set_ylabel("Gas resistance ohm")
+        ax_gas.plot(times, gas_values, color=C_GAS, linewidth=2.6)
+        ax_gas.fill_between(times, gas_values, color=C_GAS, alpha=0.14)
+        ax_gas.set_title("가스 반응 그래프")
+        ax_gas.set_xlabel("시간 (초)")
+        ax_gas.set_ylabel("가스 저항 (Ω)")
 
         ax_temp.clear()
         style_axis(ax_temp)
-        ax_temp.plot(times, temp_values, color=C_TEMP, linewidth=2.0)
-        ax_temp.set_title("Temperature")
-        ax_temp.set_xlabel("Time sec")
-        ax_temp.set_ylabel("deg C")
+        ax_temp.plot(times, temp_values, color=C_TEMP, linewidth=2.2)
+        ax_temp.set_title("온도")
+        ax_temp.set_xlabel("시간 (초)")
+        ax_temp.set_ylabel("°C")
 
-        ax_env.clear()
-        style_axis(ax_env)
-        ax_env.plot(times, hum_values, color=C_HUM, linewidth=2.0, label="Humidity %")
-        ax_env_2 = ax_env.twinx()
-        ax_env_2.plot(times, press_values, color=C_PRESS, linewidth=2.0, label="Pressure hPa")
-        ax_env.set_title("Humidity / Pressure")
-        ax_env.set_xlabel("Time sec")
-        ax_env.set_ylabel("Humidity %", color=C_HUM)
-        ax_env_2.set_ylabel("Pressure hPa", color=C_PRESS)
-        ax_env_2.tick_params(colors=C_PRESS)
-        for spine in ax_env_2.spines.values():
-            spine.set_color(GRID)
+        ax_hum.clear()
+        style_axis(ax_hum)
+        ax_hum.plot(times, hum_values, color=C_HUM, linewidth=2.2)
+        ax_hum.set_title("습도")
+        ax_hum.set_xlabel("시간 (초)")
+        ax_hum.set_ylabel("% RH")
 
-        fig.suptitle("BME688 Sensor Live Monitor", color=TEXT, fontsize=18, fontweight="bold")
+        ax_press.clear()
+        style_axis(ax_press)
+        ax_press.plot(times, press_values, color=C_PRESS, linewidth=2.2)
+        ax_press.set_title("기압")
+        ax_press.set_xlabel("시간 (초)")
+        ax_press.set_ylabel("hPa")
+
+        fig.suptitle("BME688 센서 실시간 모니터", color=TEXT, fontsize=18, fontweight="bold")
         plt.pause(0.01)
 
         time.sleep(0.7)
