@@ -1,9 +1,21 @@
-import spidev
+import time
+import board
+import digitalio
+import adafruit_bme680
 
-spi = spidev.SpiDev()
-spi.open(0, 0)
-spi.max_speed_hz = 50000
-spi.mode = 0
+spi = board.SPI()
+cs = digitalio.DigitalInOut(board.CE0)
 
-print(spi.xfer2([0x00]))
-print(spi.xfer2([0xD0, 0x00]))  # chip id 읽기 시도
+sensor = adafruit_bme680.Adafruit_BME680_SPI(
+    spi,
+    cs,
+    baudrate=50000
+)
+
+while True:
+    print("Temp:", sensor.temperature)
+    print("Humidity:", sensor.relative_humidity)
+    print("Pressure:", sensor.pressure)
+    print("Gas:", sensor.gas)
+    print("----------------")
+    time.sleep(1)
