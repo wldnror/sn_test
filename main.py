@@ -8,6 +8,7 @@ from collections import deque
 
 import spidev
 import tkinter as tk
+from tkinter import ttk, messagebox
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -16,9 +17,6 @@ import matplotlib.font_manager as fm
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
-# =========================
-# FONT
-# =========================
 FONT_PATHS = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -34,9 +32,6 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["toolbar"] = "None"
 
 
-# =========================
-# FILES
-# =========================
 DATA_DIR = "bme688_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -45,13 +40,11 @@ SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
 
 
-# =========================
-# SPI / BME688
-# =========================
 spi = spidev.SpiDev()
 spi.open(0, 0)
 spi.max_speed_hz = 50000
 spi.mode = 0
+
 
 REG_CHIP_ID = 0xD0
 REG_RESET = 0xE0
@@ -65,6 +58,7 @@ REG_RES_HEAT_0 = 0x5A
 REG_GAS_WAIT_0 = 0x64
 REG_FIELD0 = 0x1D
 REG_RANGE_SW_ERR = 0x04
+
 
 GAS_LOOKUP_1 = [
     2147483647, 2147483647, 2147483647, 2147483647,
@@ -198,7 +192,6 @@ def compensate_humidity(hum_adc, temp_c):
     )
     var3 = cal["par_h6"] / 16384.0
     var4 = cal["par_h7"] / 2097152.0
-
     humidity = var2 + ((var3 + (var4 * temp_c)) * var2 * var2)
     return max(0.0, min(100.0, humidity))
 
@@ -304,9 +297,6 @@ def read_sensor():
     }
 
 
-# =========================
-# DATA / CLASSIFIER
-# =========================
 def mean(values):
     return sum(values) / len(values) if values else 0.0
 
@@ -339,6 +329,7 @@ def extract_features(rows, label, baseline_gas=None):
     now = datetime.now()
 
     return {
+        "id": now.strftime("%Y%m%d_%H%M%S"),
         "timestamp": now.isoformat(timespec="seconds"),
         "label": label,
         "season": get_season(now.month),
@@ -373,6 +364,18 @@ def load_csv(path):
         return []
     with open(path, "r", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
+
+
+def write_csv(path, rows):
+    if not rows:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def count_labels():
@@ -435,9 +438,6 @@ def classify(feature):
     return pct, winner
 
 
-# =========================
-# UI
-# =========================
 class App:
     def __init__(self, root):
         self.root = root
@@ -456,6 +456,8 @@ class App:
         self.pending_label = None
         self.sample_until = 0
         self.sample_rows = []
+        self.sample_phase = None
+        self.phase_until = 0
 
         self.bg = "#101820"
         self.card = "#182632"
@@ -477,7 +479,7 @@ class App:
 
         self.status_label = tk.Label(
             top,
-            text="상태: 자동 기준 기록 준비중",
+            text="상태: 자동 AIR 기준 기록 준비중",
             bg=self.bg,
             fg=self.text,
             font=("NanumGothic", 16, "bold"),
@@ -486,12 +488,12 @@ class App:
 
         buttons = [
             ("전체화면/창모드", self.toggle_fullscreen),
-            ("자동 기준 ON/OFF", self.toggle_auto),
+            ("자동 AIR 기준 ON/OFF", self.toggle_auto),
             ("정상공기 학습", lambda: self.start_sample("AIR")),
             ("에탄올 학습", lambda: self.start_sample("ETHANOL")),
             ("IPA 학습", lambda: self.start_sample("IPA")),
             ("미지시료 판별", self.start_unknown),
-            ("학습 데이터 보기", self.show_training_data),
+            ("학습 데이터 관리", self.show_training_data),
             ("종료", self.close),
         ]
 
@@ -522,7 +524,7 @@ class App:
             title = tk.Label(f, text=name, bg=self.card, fg=self.muted, font=("NanumGothic", 12))
             title.pack(anchor="w")
 
-            value = tk.Label(f, text="-", bg=self.card, fg=self.text, font=("NanumGothic", 21, "bold"))
+            value = tk.Label(f, text="-", bg=self.card, fg=self.text, font=("NanumGothic", 20, "bold"))
             value.pack(anchor="w")
 
             self.cards[name] = value
@@ -536,9 +538,9 @@ class App:
 
     def update_status(self, text=None):
         counts = count_labels()
-        base_state = "자동기준 기록중" if self.auto_baseline else "자동기준 OFF"
+        base_state = "자동 AIR 기준 기록중" if self.auto_baseline else "자동 AIR 기준 OFF"
         buffer_state = f"버퍼 {len(self.baseline_buffer)}/60"
-        save_state = f"기준저장 {self.baseline_save_count}회"
+        save_state = f"AIR기준저장 {self.baseline_save_count}회"
         learn_state = f"AIR {counts['AIR']} / ETH {counts['ETHANOL']} / IPA {counts['IPA']}"
 
         if text:
@@ -560,73 +562,222 @@ class App:
         self.sample_mode = "LEARN"
         self.pending_label = label
         self.sample_rows = []
-        self.sample_until = time.time() + 60
-        self.update_status(f"{label} 학습중")
+        self.sample_phase = "READY"
+        self.phase_until = time.time() + 5
+        self.sample_until = time.time() + 65
+        self.update_status(f"{label} 학습 준비 5초")
 
     def start_unknown(self):
         self.sample_mode = "UNKNOWN"
         self.pending_label = "UNKNOWN"
         self.sample_rows = []
-        self.sample_until = time.time() + 60
-        self.update_status("미지시료 판별중")
+        self.sample_phase = "READY"
+        self.phase_until = time.time() + 5
+        self.sample_until = time.time() + 65
+        self.update_status("미지시료 판별 준비 5초")
 
     def show_training_data(self):
         win = tk.Toplevel(self.root)
-        win.title("학습 데이터 보기")
-        win.geometry("1150x680")
+        win.title("학습 데이터 관리")
+        win.geometry("1300x760")
         win.configure(bg=self.bg)
 
-        title = tk.Label(
+        header = tk.Label(
             win,
-            text="학습 데이터 요약",
+            text="학습 데이터 관리",
             bg=self.bg,
             fg=self.text,
             font=("NanumGothic", 18, "bold"),
         )
-        title.pack(pady=10)
+        header.pack(pady=10)
 
-        text = tk.Text(
+        summary = tk.Label(
             win,
+            text="",
+            bg=self.bg,
+            fg=self.text,
+            font=("NanumGothic", 12),
+        )
+        summary.pack(pady=4)
+
+        columns = (
+            "id", "timestamp", "label", "season", "period",
+            "gas_change_pct", "gas_avg", "gas_min", "gas_max",
+            "temp_avg", "hum_avg", "press_avg", "count"
+        )
+
+        frame = tk.Frame(win, bg=self.bg)
+        frame.pack(fill="both", expand=True, padx=10, pady=8)
+
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=18)
+        tree.pack(side="left", fill="both", expand=True)
+
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scroll.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=scroll.set)
+
+        headings = {
+            "id": "ID",
+            "timestamp": "시간",
+            "label": "종류",
+            "season": "계절",
+            "period": "시간대",
+            "gas_change_pct": "변화율%",
+            "gas_avg": "평균Ω",
+            "gas_min": "최저Ω",
+            "gas_max": "최고Ω",
+            "temp_avg": "온도",
+            "hum_avg": "습도",
+            "press_avg": "기압",
+            "count": "개수",
+        }
+
+        widths = {
+            "id": 120,
+            "timestamp": 150,
+            "label": 85,
+            "season": 55,
+            "period": 60,
+            "gas_change_pct": 80,
+            "gas_avg": 90,
+            "gas_min": 90,
+            "gas_max": 90,
+            "temp_avg": 70,
+            "hum_avg": 70,
+            "press_avg": 85,
+            "count": 60,
+        }
+
+        for c in columns:
+            tree.heading(c, text=headings[c])
+            tree.column(c, width=widths[c], anchor="center")
+
+        detail = tk.Text(
+            win,
+            height=8,
             bg="#0B1218",
             fg=self.text,
             insertbackground=self.text,
             font=("NanumGothic", 11),
-            wrap="none",
         )
-        text.pack(fill="both", expand=True, padx=10, pady=10)
+        detail.pack(fill="x", padx=10, pady=8)
 
-        rows = load_csv(SAMPLES_CSV)
-        baselines = load_csv(BASELINE_CSV)
+        def load_table():
+            for item in tree.get_children():
+                tree.delete(item)
 
-        counts = count_labels()
+            rows = load_csv(SAMPLES_CSV)
+            baselines = load_csv(BASELINE_CSV)
+            counts = count_labels()
 
-        text.insert("end", f"저장 폴더: {os.path.abspath(DATA_DIR)}\n\n")
-        text.insert("end", f"자동 기준 기록 수: {len(baselines)}개\n")
-        text.insert("end", f"AIR 학습 수: {counts['AIR']}개\n")
-        text.insert("end", f"ETHANOL 학습 수: {counts['ETHANOL']}개\n")
-        text.insert("end", f"IPA 학습 수: {counts['IPA']}개\n\n")
-
-        if not rows:
-            text.insert("end", "아직 학습 데이터가 없습니다.\n")
-            return
-
-        text.insert("end", "최근 학습 데이터 40개\n")
-        text.insert("end", "-" * 140 + "\n")
-
-        for r in rows[-40:]:
-            line = (
-                f"{r.get('timestamp','')} | "
-                f"{r.get('label',''):8s} | "
-                f"{r.get('season','')} | "
-                f"{r.get('period','')} | "
-                f"gas_avg={float(r.get('gas_avg',0)):,.0f}Ω | "
-                f"min={float(r.get('gas_min',0)):,.0f}Ω | "
-                f"change={float(r.get('gas_change_pct',0)):.1f}% | "
-                f"T={float(r.get('temp_avg',0)):.1f}℃ | "
-                f"H={float(r.get('hum_avg',0)):.1f}% | "
-                f"P={float(r.get('press_avg',0)):.1f}hPa\n"
+            summary.config(
+                text=f"저장폴더: {os.path.abspath(DATA_DIR)}    "
+                     f"자동 AIR 기준: {len(baselines)}개    "
+                     f"AIR: {counts['AIR']}개 / ETHANOL: {counts['ETHANOL']}개 / IPA: {counts['IPA']}개"
             )
-            text.insert("end", line)
+
+            for idx, r in enumerate(rows):
+                values = (
+                    r.get("id", idx),
+                    r.get("timestamp", ""),
+                    r.get("label", ""),
+                    r.get("season", ""),
+                    r.get("period", ""),
+                    f"{float(r.get('gas_change_pct', 0)):.1f}",
+                    f"{float(r.get('gas_avg', 0)):,.0f}",
+                    f"{float(r.get('gas_min', 0)):,.0f}",
+                    f"{float(r.get('gas_max', 0)):,.0f}",
+                    f"{float(r.get('temp_avg', 0)):.1f}",
+                    f"{float(r.get('hum_avg', 0)):.1f}",
+                    f"{float(r.get('press_avg', 0)):.1f}",
+                    r.get("count", ""),
+                )
+                tree.insert("", "end", iid=str(idx), values=values)
+
+        def show_detail(_event=None):
+            selected = tree.selection()
+            detail.delete("1.0", "end")
+
+            if not selected:
+                return
+
+            idx = int(selected[0])
+            rows = load_csv(SAMPLES_CSV)
+
+            if idx >= len(rows):
+                return
+
+            r = rows[idx]
+            for k, v in r.items():
+                detail.insert("end", f"{k}: {v}\n")
+
+        def delete_selected():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("알림", "삭제할 데이터를 선택하세요.")
+                return
+
+            if not messagebox.askyesno("삭제 확인", "선택한 학습 데이터를 삭제할까요?"):
+                return
+
+            rows = load_csv(SAMPLES_CSV)
+            indexes = sorted([int(i) for i in selected], reverse=True)
+
+            for idx in indexes:
+                if 0 <= idx < len(rows):
+                    del rows[idx]
+
+            write_csv(SAMPLES_CSV, rows)
+            load_table()
+            detail.delete("1.0", "end")
+            self.update_status("학습 데이터 삭제 완료")
+
+        def delete_last():
+            rows = load_csv(SAMPLES_CSV)
+            if not rows:
+                return
+
+            if not messagebox.askyesno("삭제 확인", "가장 최근 학습 데이터 1개를 삭제할까요?"):
+                return
+
+            rows.pop()
+            write_csv(SAMPLES_CSV, rows)
+            load_table()
+            detail.delete("1.0", "end")
+            self.update_status("최근 학습 데이터 삭제 완료")
+
+        def clear_all():
+            if not messagebox.askyesno("전체 초기화", "모든 학습 데이터를 삭제할까요? 자동 AIR 기준은 삭제하지 않습니다."):
+                return
+
+            write_csv(SAMPLES_CSV, [])
+            load_table()
+            detail.delete("1.0", "end")
+            self.update_status("학습 데이터 전체 초기화 완료")
+
+        def clear_baseline():
+            if not messagebox.askyesno("AIR 기준 초기화", "자동 AIR 기준 기록을 모두 삭제할까요?"):
+                return
+
+            write_csv(BASELINE_CSV, [])
+            self.baseline_save_count = 0
+            self.baseline_buffer = []
+            load_table()
+            self.update_status("자동 AIR 기준 초기화 완료")
+
+        tree.bind("<<TreeviewSelect>>", show_detail)
+
+        btns = tk.Frame(win, bg=self.bg)
+        btns.pack(fill="x", padx=10, pady=8)
+
+        tk.Button(btns, text="새로고침", command=load_table, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
+        tk.Button(btns, text="선택 삭제", command=delete_selected, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
+        tk.Button(btns, text="최근 1개 삭제", command=delete_last, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
+        tk.Button(btns, text="학습 전체 초기화", command=clear_all, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
+        tk.Button(btns, text="자동 AIR 기준 초기화", command=clear_baseline, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
+        tk.Button(btns, text="닫기", command=win.destroy, font=("NanumGothic", 11, "bold")).pack(side="right", padx=5)
+
+        load_table()
 
     def close(self):
         self.running = False
@@ -646,11 +797,11 @@ class App:
                 self.current_rows.append(row)
                 save_dict_csv(RAW_CSV, row)
 
-                if self.auto_baseline and row["gas_valid"] and row["heat_stable"]:
+                if self.auto_baseline and row["gas_valid"] and row["heat_stable"] and self.sample_mode is None:
                     self.baseline_buffer.append(row)
 
                     if len(self.baseline_buffer) >= 60:
-                        feature = extract_features(self.baseline_buffer, "AUTO_BASELINE")
+                        feature = extract_features(self.baseline_buffer, "AUTO_AIR_BASELINE")
 
                         if feature:
                             save_dict_csv(BASELINE_CSV, feature)
@@ -660,13 +811,34 @@ class App:
                         self.baseline_buffer = []
 
                 if self.sample_mode:
-                    self.sample_rows.append(row)
-                    remain = int(self.sample_until - time.time())
+                    now = time.time()
 
-                    if remain <= 0:
-                        self.finish_sample()
-                    else:
-                        self.update_status(f"{self.pending_label} 측정중 {remain}초")
+                    if self.sample_phase == "READY":
+                        remain = int(self.phase_until - now)
+                        if remain <= 0:
+                            self.sample_phase = "EXPOSE"
+                            self.phase_until = now + 20
+                            self.update_status(f"{self.pending_label} 노출 기록 20초")
+                        else:
+                            self.update_status(f"{self.pending_label} 준비 {remain}초")
+
+                    elif self.sample_phase == "EXPOSE":
+                        self.sample_rows.append(row)
+                        remain = int(self.phase_until - now)
+                        if remain <= 0:
+                            self.sample_phase = "RECOVER"
+                            self.phase_until = now + 40
+                            self.update_status(f"{self.pending_label} 회복 기록 40초")
+                        else:
+                            self.update_status(f"{self.pending_label} 노출중 {remain}초")
+
+                    elif self.sample_phase == "RECOVER":
+                        self.sample_rows.append(row)
+                        remain = int(self.phase_until - now)
+                        if remain <= 0:
+                            self.finish_sample()
+                        else:
+                            self.update_status(f"{self.pending_label} 회복중 {remain}초")
 
                 else:
                     self.update_status()
@@ -698,6 +870,7 @@ class App:
         self.sample_mode = None
         self.pending_label = None
         self.sample_rows = []
+        self.sample_phase = None
 
     def style_axis(self, ax):
         ax.set_facecolor(self.card)
@@ -746,7 +919,7 @@ class App:
             self.ax_env.legend(facecolor=self.card, edgecolor="#314452", labelcolor=self.text)
 
             self.fig.suptitle(
-                "BME688 자동 기준 학습 / 에탄올 / IPA 판별 시스템",
+                "BME688 자동 AIR 기준 / 에탄올 / IPA 학습 판별 시스템",
                 color=self.text,
                 fontsize=16,
                 fontweight="bold",
