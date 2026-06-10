@@ -4,7 +4,7 @@ import math
 import time
 import threading
 from datetime import datetime
-from collections import deque
+from collections import deque, Counter
 
 import spidev
 import tkinter as tk
@@ -17,6 +17,9 @@ import matplotlib.font_manager as fm
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
+# =========================
+# FONT
+# =========================
 FONT_PATHS = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -32,6 +35,9 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["toolbar"] = "None"
 
 
+# =========================
+# FILES
+# =========================
 DATA_DIR = "bme688_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -40,11 +46,13 @@ SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
 
 
+# =========================
+# SPI / BME688
+# =========================
 spi = spidev.SpiDev()
 spi.open(0, 0)
 spi.max_speed_hz = 50000
 spi.mode = 0
-
 
 REG_CHIP_ID = 0xD0
 REG_RESET = 0xE0
@@ -58,7 +66,6 @@ REG_RES_HEAT_0 = 0x5A
 REG_GAS_WAIT_0 = 0x64
 REG_FIELD0 = 0x1D
 REG_RANGE_SW_ERR = 0x04
-
 
 GAS_LOOKUP_1 = [
     2147483647, 2147483647, 2147483647, 2147483647,
@@ -297,6 +304,9 @@ def read_sensor():
     }
 
 
+# =========================
+# DATA / CLASSIFIER
+# =========================
 def mean(values):
     return sum(values) / len(values) if values else 0.0
 
@@ -438,6 +448,9 @@ def classify(feature):
     return pct, winner
 
 
+# =========================
+# APP
+# =========================
 class App:
     def __init__(self, root):
         self.root = root
@@ -447,17 +460,22 @@ class App:
 
         self.running = True
         self.auto_baseline = True
+        self.realtime_detect = True
+
         self.current_rows = deque(maxlen=300)
+        self.detect_rows = deque(maxlen=45)
         self.baseline_buffer = []
         self.latest_air_gas = None
         self.baseline_save_count = len(load_csv(BASELINE_CSV))
 
         self.sample_mode = None
         self.pending_label = None
-        self.sample_until = 0
         self.sample_rows = []
         self.sample_phase = None
         self.phase_until = 0
+
+        self.detect_history = deque(maxlen=3)
+        self.last_realtime_text = "실시간 판별 대기"
 
         self.bg = "#101820"
         self.card = "#182632"
@@ -482,12 +500,13 @@ class App:
             text="상태: 자동 AIR 기준 기록 준비중",
             bg=self.bg,
             fg=self.text,
-            font=("NanumGothic", 16, "bold"),
+            font=("NanumGothic", 15, "bold"),
         )
         self.status_label.pack(side="left", padx=8)
 
         buttons = [
             ("전체화면/창모드", self.toggle_fullscreen),
+            ("실시간 판별 ON/OFF", self.toggle_realtime),
             ("자동 AIR 기준 ON/OFF", self.toggle_auto),
             ("정상공기 학습", lambda: self.start_sample("AIR")),
             ("에탄올 학습", lambda: self.start_sample("ETHANOL")),
@@ -502,13 +521,13 @@ class App:
                 top,
                 text=txt,
                 command=cmd,
-                font=("NanumGothic", 11, "bold"),
+                font=("NanumGothic", 10, "bold"),
                 bg="#263847",
                 fg=self.text,
                 activebackground="#365369",
                 activeforeground="white",
                 relief="flat",
-                padx=10,
+                padx=8,
                 pady=7,
             ).pack(side="right", padx=3)
 
@@ -517,14 +536,14 @@ class App:
 
         self.cards = {}
 
-        for name in ["가스저항", "온도", "습도", "기압", "판별결과"]:
+        for name in ["현재상태", "가스저항", "온도", "습도", "기압", "판별확률"]:
             f = tk.Frame(info, bg=self.card, padx=14, pady=10)
             f.pack(side="left", fill="x", expand=True, padx=5, pady=5)
 
-            title = tk.Label(f, text=name, bg=self.card, fg=self.muted, font=("NanumGothic", 12))
+            title = tk.Label(f, text=name, bg=self.card, fg=self.muted, font=("NanumGothic", 11))
             title.pack(anchor="w")
 
-            value = tk.Label(f, text="-", bg=self.card, fg=self.text, font=("NanumGothic", 20, "bold"))
+            value = tk.Label(f, text="-", bg=self.card, fg=self.text, font=("NanumGothic", 18, "bold"))
             value.pack(anchor="w")
 
             self.cards[name] = value
@@ -539,14 +558,15 @@ class App:
     def update_status(self, text=None):
         counts = count_labels()
         base_state = "자동 AIR 기준 기록중" if self.auto_baseline else "자동 AIR 기준 OFF"
+        detect_state = "실시간 판별 ON" if self.realtime_detect else "실시간 판별 OFF"
         buffer_state = f"버퍼 {len(self.baseline_buffer)}/60"
         save_state = f"AIR기준저장 {self.baseline_save_count}회"
         learn_state = f"AIR {counts['AIR']} / ETH {counts['ETHANOL']} / IPA {counts['IPA']}"
 
         if text:
-            msg = f"상태: {text} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
+            msg = f"상태: {text} | {detect_state} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
         else:
-            msg = f"상태: {base_state} | {buffer_state} | {save_state} | {learn_state}"
+            msg = f"상태: {detect_state} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
 
         self.status_label.config(text=msg)
 
@@ -558,13 +578,16 @@ class App:
         self.auto_baseline = not self.auto_baseline
         self.update_status()
 
+    def toggle_realtime(self):
+        self.realtime_detect = not self.realtime_detect
+        self.update_status()
+
     def start_sample(self, label):
         self.sample_mode = "LEARN"
         self.pending_label = label
         self.sample_rows = []
         self.sample_phase = "READY"
         self.phase_until = time.time() + 5
-        self.sample_until = time.time() + 65
         self.update_status(f"{label} 학습 준비 5초")
 
     def start_unknown(self):
@@ -573,8 +596,58 @@ class App:
         self.sample_rows = []
         self.sample_phase = "READY"
         self.phase_until = time.time() + 5
-        self.sample_until = time.time() + 65
         self.update_status("미지시료 판별 준비 5초")
+
+    def run_realtime_detect(self):
+        if not self.realtime_detect:
+            return
+
+        if self.sample_mode is not None:
+            return
+
+        if len(self.detect_rows) < 25:
+            self.cards["현재상태"].config(text="데이터 수집중")
+            self.cards["판별확률"].config(text="-")
+            return
+
+        feature = extract_features(list(self.detect_rows), "REALTIME", self.latest_air_gas)
+        if not feature:
+            return
+
+        pct, winner = classify(feature)
+
+        if winner in ["학습 데이터 없음", "판별 불가"]:
+            self.cards["현재상태"].config(text=winner)
+            self.cards["판별확률"].config(text="학습 필요")
+            return
+
+        best_pct = pct[winner]
+        self.detect_history.append(winner)
+
+        stable = len(self.detect_history) == 3 and len(set(self.detect_history)) == 1
+        enough_confidence = best_pct >= 60.0
+
+        if stable and enough_confidence:
+            if winner == "AIR":
+                state = "정상공기"
+                color = "#4DFF88"
+            elif winner == "ETHANOL":
+                state = "에탄올 감지"
+                color = "#FF6B6B"
+            elif winner == "IPA":
+                state = "IPA 감지"
+                color = "#FFD166"
+            else:
+                state = winner
+                color = self.text
+        else:
+            state = f"{winner} 의심"
+            color = "#00E5FF"
+
+        self.cards["현재상태"].config(text=f"{state} {best_pct:.1f}%", fg=color)
+        self.cards["판별확률"].config(
+            text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
+        )
 
     def show_training_data(self):
         win = tk.Toplevel(self.root)
@@ -632,25 +705,9 @@ class App:
             "count": "개수",
         }
 
-        widths = {
-            "id": 120,
-            "timestamp": 150,
-            "label": 85,
-            "season": 55,
-            "period": 60,
-            "gas_change_pct": 80,
-            "gas_avg": 90,
-            "gas_min": 90,
-            "gas_max": 90,
-            "temp_avg": 70,
-            "hum_avg": 70,
-            "press_avg": 85,
-            "count": 60,
-        }
-
         for c in columns:
             tree.heading(c, text=headings[c])
-            tree.column(c, width=widths[c], anchor="center")
+            tree.column(c, width=90, anchor="center")
 
         detail = tk.Text(
             win,
@@ -755,16 +812,6 @@ class App:
             detail.delete("1.0", "end")
             self.update_status("학습 데이터 전체 초기화 완료")
 
-        def clear_baseline():
-            if not messagebox.askyesno("AIR 기준 초기화", "자동 AIR 기준 기록을 모두 삭제할까요?"):
-                return
-
-            write_csv(BASELINE_CSV, [])
-            self.baseline_save_count = 0
-            self.baseline_buffer = []
-            load_table()
-            self.update_status("자동 AIR 기준 초기화 완료")
-
         tree.bind("<<TreeviewSelect>>", show_detail)
 
         btns = tk.Frame(win, bg=self.bg)
@@ -774,7 +821,6 @@ class App:
         tk.Button(btns, text="선택 삭제", command=delete_selected, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
         tk.Button(btns, text="최근 1개 삭제", command=delete_last, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
         tk.Button(btns, text="학습 전체 초기화", command=clear_all, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
-        tk.Button(btns, text="자동 AIR 기준 초기화", command=clear_baseline, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
         tk.Button(btns, text="닫기", command=win.destroy, font=("NanumGothic", 11, "bold")).pack(side="right", padx=5)
 
         load_table()
@@ -795,6 +841,7 @@ class App:
             try:
                 row = read_sensor()
                 self.current_rows.append(row)
+                self.detect_rows.append(row)
                 save_dict_csv(RAW_CSV, row)
 
                 if self.auto_baseline and row["gas_valid"] and row["heat_stable"] and self.sample_mode is None:
@@ -841,6 +888,7 @@ class App:
                             self.update_status(f"{self.pending_label} 회복중 {remain}초")
 
                 else:
+                    self.run_realtime_detect()
                     self.update_status()
 
             except Exception as e:
@@ -862,10 +910,11 @@ class App:
 
         else:
             pct, winner = classify(feature)
-            self.cards["판별결과"].config(
-                text=f"{winner} | AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
+            self.cards["현재상태"].config(text=f"{winner}")
+            self.cards["판별확률"].config(
+                text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
             )
-            self.update_status("판별 완료")
+            self.update_status("수동 판별 완료")
 
         self.sample_mode = None
         self.pending_label = None
@@ -919,7 +968,7 @@ class App:
             self.ax_env.legend(facecolor=self.card, edgecolor="#314452", labelcolor=self.text)
 
             self.fig.suptitle(
-                "BME688 자동 AIR 기준 / 에탄올 / IPA 학습 판별 시스템",
+                "BME688 실시간 에탄올 / IPA 판별 시스템",
                 color=self.text,
                 fontsize=16,
                 fontweight="bold",
