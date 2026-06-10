@@ -4,15 +4,18 @@ from collections import deque
 import spidev
 import matplotlib.pyplot as plt
 
+
 spi = spidev.SpiDev()
 spi.open(0, 0)
 spi.max_speed_hz = 50000
 spi.mode = 0
 
+
 REG_CHIP_ID = 0xD0
 REG_RESET = 0xE0
 REG_STATUS = 0x73
 
+REG_CTRL_GAS_0 = 0x70
 REG_CTRL_GAS_1 = 0x71
 REG_CTRL_HUM = 0x72
 REG_CTRL_MEAS = 0x74
@@ -34,9 +37,6 @@ def write_reg_raw(reg, value):
 def set_mem_page(reg):
     status = read_reg_raw(REG_STATUS)
 
-    # Observed on your sensor:
-    # high registers like 0xD0 work with bit4 = 0
-    # low registers like 0x5A, 0x64, 0x71 need bit4 = 1
     if reg < 0x80:
         status |= 0x10
     else:
@@ -74,26 +74,44 @@ def sensor_init():
         raise RuntimeError("BME688/BME680 chip ID error")
 
     sensor_reset()
-
     print("Chip ID after reset:", hex(read_reg(REG_CHIP_ID)))
 
+    # IIR filter
     write_reg(REG_CONFIG, 0x08)
+
+    # Humidity oversampling x1
     write_reg(REG_CTRL_HUM, 0x01)
 
+    # Enable gas heater
+    write_reg(REG_CTRL_GAS_0, 0x00)
+
+    # Heater resistance test value
     write_reg(REG_RES_HEAT_0, 0x73)
+
+    # Heater duration about 100 ms
     write_reg(REG_GAS_WAIT_0, 0x59)
 
-    # run_gas bit5 = 1
+    # run_gas bit5 = 1, heater profile 0
     write_reg(REG_CTRL_GAS_1, 0x20)
 
     print("Register check:")
-    for r in [REG_CONFIG, REG_CTRL_HUM, REG_RES_HEAT_0, REG_GAS_WAIT_0, REG_CTRL_GAS_1]:
+    for r in [
+        REG_CONFIG,
+        REG_CTRL_HUM,
+        REG_CTRL_GAS_0,
+        REG_RES_HEAT_0,
+        REG_GAS_WAIT_0,
+        REG_CTRL_GAS_1,
+    ]:
         print(hex(r), "=", hex(read_reg(r)))
 
     print("Sensor init done")
 
 
 def trigger_forced_measurement():
+    # temp oversampling x2
+    # pressure oversampling x16
+    # forced mode
     ctrl_meas = (0b010 << 5) | (0b101 << 2) | 0b01
     write_reg(REG_CTRL_MEAS, ctrl_meas)
 
@@ -157,7 +175,7 @@ print("Press Ctrl+C to stop.")
 try:
     while True:
         trigger_forced_measurement()
-        time.sleep(0.5)
+        time.sleep(0.8)
 
         d = read_raw_data()
         now = time.time() - start_time
