@@ -54,30 +54,11 @@ UNKNOWN_SEC = 300
 DEFAULT_AMOUNT_ML = "0.05"
 
 TRAIN_PRESETS = [
-    {
-        "button": "정상공기 30분",
-        "label": "AIR",
-        "level": "AIR",
-        "amount_ml": "0",
-        "duration_sec": AIR_TRAIN_SEC,
-        "guide": "시료를 넣지 말고 정상공기 상태를 유지하세요.",
-    },
-    {
-        "button": "IPA 0.05mL 5분",
-        "label": "IPA",
-        "level": "STD",
-        "amount_ml": DEFAULT_AMOUNT_ML,
-        "duration_sec": GAS_TRAIN_SEC,
-        "guide": "20cc 약병에 IPA 0.05mL 기준으로 넣고 주입하세요.",
-    },
-    {
-        "button": "에탄올 0.05mL 5분",
-        "label": "ETHANOL",
-        "level": "STD",
-        "amount_ml": DEFAULT_AMOUNT_ML,
-        "duration_sec": GAS_TRAIN_SEC,
-        "guide": "20cc 약병에 에탄올 0.05mL 기준으로 넣고 주입하세요.",
-    },
+    {"button": "정상공기 30분", "label": "AIR", "level": "AIR", "amount_ml": "0", "duration_sec": AIR_TRAIN_SEC, "guide": "시료를 넣지 말고 정상공기 상태를 유지하세요."},
+    {"button": "IPA 0.05mL 5분", "label": "IPA", "level": "LOW", "amount_ml": "0.05", "duration_sec": GAS_TRAIN_SEC, "guide": "IPA 0.05mL 기준으로 주입하세요."},
+    {"button": "에탄올 0.05mL 5분", "label": "ETHANOL", "level": "LOW", "amount_ml": "0.05", "duration_sec": GAS_TRAIN_SEC, "guide": "에탄올 0.05mL 기준으로 주입하세요."},
+    {"button": "IPA HIGH 5분", "label": "IPA", "level": "HIGH", "amount_ml": "HIGH", "duration_sec": GAS_TRAIN_SEC, "guide": "IPA 강한 조건으로 주입하세요."},
+    {"button": "에탄올 HIGH 5분", "label": "ETHANOL", "level": "HIGH", "amount_ml": "HIGH", "duration_sec": GAS_TRAIN_SEC, "guide": "에탄올 강한 조건으로 주입하세요."},
 ]
 
 HEATER_STEPS = [
@@ -101,7 +82,6 @@ for path in FONT_PATHS:
 
 matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["toolbar"] = "None"
-
 
 spi = spidev.SpiDev()
 spi.open(0, 0)
@@ -211,7 +191,6 @@ def read_calibration():
     cal["par_h5"] = s8(b2[5])
     cal["par_h6"] = b2[6]
     cal["par_h7"] = s8(b2[7])
-
     cal["range_sw_err"] = (read_reg(REG_RANGE_SW_ERR) & 0xF0) >> 4
 
 
@@ -248,10 +227,7 @@ def compensate_pressure(press_adc):
 
 def compensate_humidity(hum_adc, temp_c):
     var1 = hum_adc - ((cal["par_h1"] * 16.0) + ((cal["par_h3"] / 2.0) * temp_c))
-    var2 = var1 * (
-        (cal["par_h2"] / 262144.0)
-        * (1.0 + (cal["par_h4"] / 16384.0) * temp_c + (cal["par_h5"] / 1048576.0) * temp_c * temp_c)
-    )
+    var2 = var1 * ((cal["par_h2"] / 262144.0) * (1.0 + (cal["par_h4"] / 16384.0) * temp_c + (cal["par_h5"] / 1048576.0) * temp_c * temp_c))
     var3 = cal["par_h6"] / 16384.0
     var4 = cal["par_h7"] / 2097152.0
     humidity = var2 + ((var3 + (var4 * temp_c)) * var2 * var2)
@@ -293,7 +269,6 @@ def sensor_init():
     write_reg(REG_CONFIG, 0x08)
     write_reg(REG_CTRL_HUM, 0x01)
     write_reg(REG_CTRL_GAS_0, 0x00)
-
     set_heater(HEATER_STEPS[0][1])
 
 
@@ -538,9 +513,13 @@ def add_segment_features(feature, rows, prefix, baseline_gas=None):
         feature[f"{prefix}_gas_min"] = 0
         feature[f"{prefix}_gas_max"] = 0
         feature[f"{prefix}_gas_change_pct"] = 0
+        feature[f"{prefix}_hum_avg"] = 0
+        feature[f"{prefix}_hum_max"] = 0
+        feature[f"{prefix}_hum_rise_abs"] = 0
         return
 
     gas = [r["gas_ohm"] for r in rows]
+    hum = [r["hum_pct"] for r in rows]
     gas_start = mean(gas[:max(3, min(10, len(gas)))])
     gas_min = min(gas)
     ref = baseline_gas if baseline_gas and baseline_gas > 0 else gas_start
@@ -552,9 +531,23 @@ def add_segment_features(feature, rows, prefix, baseline_gas=None):
     feature[f"{prefix}_gas_stdev"] = stdev(gas)
     feature[f"{prefix}_gas_change_pct"] = ((gas_min - ref) / ref) * 100.0 if ref else 0
 
+    hum_start = mean(hum[:max(3, min(10, len(hum)))])
+    hum_end = mean(hum[-max(3, min(10, len(hum))):])
+    hum_max = max(hum)
+    hum_min = min(hum)
+
+    feature[f"{prefix}_hum_avg"] = mean(hum)
+    feature[f"{prefix}_hum_min"] = hum_min
+    feature[f"{prefix}_hum_max"] = hum_max
+    feature[f"{prefix}_hum_start"] = hum_start
+    feature[f"{prefix}_hum_end"] = hum_end
+    feature[f"{prefix}_hum_rise_abs"] = hum_max - hum_start
+    feature[f"{prefix}_hum_end_vs_start"] = hum_end - hum_start
+
     for heater_name, _, _, _ in HEATER_STEPS:
         hrows = [r for r in rows if r.get("heater") == heater_name]
         hgas = [r["gas_ohm"] for r in hrows if r.get("gas_ohm", 0) > 0]
+        hhum = [r["hum_pct"] for r in hrows]
         hp = f"{prefix}_{heater_name.lower()}"
 
         if len(hgas) >= 3:
@@ -576,6 +569,60 @@ def add_segment_features(feature, rows, prefix, baseline_gas=None):
             feature[f"{hp}_change_pct"] = 0
             feature[f"{hp}_count"] = len(hgas)
 
+        if len(hhum) >= 3:
+            feature[f"{hp}_hum_avg"] = mean(hhum)
+            feature[f"{hp}_hum_max"] = max(hhum)
+            feature[f"{hp}_hum_min"] = min(hhum)
+        else:
+            feature[f"{hp}_hum_avg"] = 0
+            feature[f"{hp}_hum_max"] = 0
+            feature[f"{hp}_hum_min"] = 0
+
+
+def calc_shape_features(valid_rows):
+    gas = [r["gas_ohm"] for r in valid_rows if r["gas_ohm"] > 0]
+
+    if len(gas) < 10:
+        return {
+            "gas_smooth_score": 0,
+            "gas_step_score": 0,
+            "gas_slope_avg": 0,
+            "gas_slope_stdev": 0,
+            "gas_direction_changes": 0,
+        }
+
+    diffs = [gas[i] - gas[i - 1] for i in range(1, len(gas))]
+    abs_diffs = [abs(x) for x in diffs]
+    gas_avg = mean(gas)
+    smooth_score = mean(abs_diffs) / gas_avg if gas_avg else 0
+
+    direction_changes = 0
+    prev = 0
+
+    for d in diffs:
+        cur = 1 if d > 0 else -1 if d < 0 else 0
+        if prev != 0 and cur != 0 and cur != prev:
+            direction_changes += 1
+        if cur != 0:
+            prev = cur
+
+    heater_avgs = []
+
+    for heater_name, _, _, _ in HEATER_STEPS:
+        vals = [r["gas_ohm"] for r in valid_rows if r.get("heater") == heater_name and r["gas_ohm"] > 0]
+        heater_avgs.append(mean(vals) if vals else 0)
+
+    usable = [v for v in heater_avgs if v > 0]
+    step_score = stdev(usable) / mean(usable) if len(usable) >= 2 and mean(usable) else 0
+
+    return {
+        "gas_smooth_score": smooth_score,
+        "gas_step_score": step_score,
+        "gas_slope_avg": mean(diffs),
+        "gas_slope_stdev": stdev(diffs),
+        "gas_direction_changes": direction_changes,
+    }
+
 
 def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None):
     valid_rows = clean_valid_rows(rows)
@@ -584,8 +631,8 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
         return None
 
     gas = [r["gas_ohm"] for r in valid_rows]
-    temp = [r["temp_c"] for r in valid_rows]
     hum = [r["hum_pct"] for r in valid_rows]
+    temp = [r["temp_c"] for r in valid_rows]
     press = [r["press_hpa"] for r in valid_rows]
     gas_range = [r["gas_range"] for r in valid_rows]
     gas_adc = [r["gas_adc"] for r in valid_rows]
@@ -596,19 +643,30 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
     gas_max = max(gas)
     gas_avg = mean(gas)
 
+    hum_start = mean(hum[:max(3, min(10, len(hum)))])
+    hum_end = mean(hum[-max(3, min(10, len(hum))):])
+    hum_max = max(hum)
+    hum_min = min(hum)
+    hum_max_idx = hum.index(hum_max)
+
     ref = baseline_gas if baseline_gas and baseline_gas > 0 else gas_start
     change_pct = ((gas_min - ref) / ref) * 100.0 if ref else 0.0
 
     min_idx = gas.index(gas_min)
     start_epoch = valid_rows[0]["epoch"]
     min_epoch = valid_rows[min_idx]["epoch"]
+    hum_max_epoch = valid_rows[hum_max_idx]["epoch"]
     end_epoch = valid_rows[-1]["epoch"]
+
     duration = max(0.001, end_epoch - start_epoch)
     time_to_min_sec = min_epoch - start_epoch
     time_to_min_ratio = time_to_min_sec / duration
+    hum_time_to_max_sec = hum_max_epoch - start_epoch
+    hum_time_to_max_ratio = hum_time_to_max_sec / duration
 
     n = len(valid_rows)
     one = max(1, n // 3)
+
     early_rows = valid_rows[:one]
     mid_rows = valid_rows[one:one * 2]
     late_rows = valid_rows[one * 2:]
@@ -617,14 +675,23 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
     mid_gas = [r["gas_ohm"] for r in mid_rows]
     late_gas = [r["gas_ohm"] for r in late_rows]
 
+    early_hum = [r["hum_pct"] for r in early_rows]
+    mid_hum = [r["hum_pct"] for r in mid_rows]
+    late_hum = [r["hum_pct"] for r in late_rows]
+
     early_avg = mean(early_gas)
     mid_avg = mean(mid_gas)
     late_avg = mean(late_gas)
+
+    early_hum_avg = mean(early_hum)
+    mid_hum_avg = mean(mid_hum)
+    late_hum_avg = mean(late_hum)
 
     evap_weighted_avg = (early_avg * 0.45) + (mid_avg * 0.35) + (late_avg * 0.20)
     evap_drop_pct = ((late_avg - early_avg) / early_avg) * 100.0 if early_avg else 0.0
     evap_mid_pct = ((mid_avg - early_avg) / early_avg) * 100.0 if early_avg else 0.0
 
+    shape = calc_shape_features(valid_rows)
     now = datetime.now()
 
     feature = {
@@ -657,6 +724,20 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
         "temp_stdev": stdev(temp),
         "hum_avg": mean(hum),
         "hum_stdev": stdev(hum),
+        "hum_start": hum_start,
+        "hum_end": hum_end,
+        "hum_min": hum_min,
+        "hum_max": hum_max,
+        "hum_rise_abs": hum_max - hum_start,
+        "hum_rise_pct": ((hum_max - hum_start) / hum_start) * 100.0 if hum_start else 0,
+        "hum_end_vs_start": hum_end - hum_start,
+        "hum_time_to_max_sec": hum_time_to_max_sec,
+        "hum_time_to_max_ratio": hum_time_to_max_ratio,
+        "hum_early_avg": early_hum_avg,
+        "hum_mid_avg": mid_hum_avg,
+        "hum_late_avg": late_hum_avg,
+        "hum_mid_vs_early": mid_hum_avg - early_hum_avg,
+        "hum_late_vs_early": late_hum_avg - early_hum_avg,
         "press_avg": mean(press),
         "press_stdev": stdev(press),
         "sensor_temp_avg": mean(temp),
@@ -668,6 +749,11 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
         "evap_early_gas_avg": early_avg,
         "evap_mid_gas_avg": mid_avg,
         "evap_late_gas_avg": late_avg,
+        "gas_smooth_score": shape["gas_smooth_score"],
+        "gas_step_score": shape["gas_step_score"],
+        "gas_slope_avg": shape["gas_slope_avg"],
+        "gas_slope_stdev": shape["gas_slope_stdev"],
+        "gas_direction_changes": shape["gas_direction_changes"],
     }
 
     add_segment_features(feature, valid_rows, "all", baseline_gas)
@@ -775,6 +861,7 @@ META_KEYS = {
 
 def numeric_keys(row):
     keys = []
+
     for k, v in row.items():
         if k in META_KEYS:
             continue
@@ -783,6 +870,7 @@ def numeric_keys(row):
             keys.append(k)
         except Exception:
             pass
+
     return keys
 
 
@@ -796,19 +884,34 @@ def key_scale(key):
     if key in ["press_avg", "sensor_press_avg"]:
         return 0.04
 
+    if key in ["hum_rise_abs", "hum_end_vs_start", "hum_mid_vs_early", "hum_late_vs_early"]:
+        return 3.5
+
+    if key in ["hum_rise_pct"]:
+        return 1.8
+
+    if key in ["hum_time_to_max_ratio"]:
+        return 45.0
+
     if key.startswith("early_"):
+        if "hum" in key:
+            return 3.2
         if key.endswith("_change_pct"):
             return 3.6
         if key.endswith("_avg") or key.endswith("_min"):
             return 0.0012
 
     if key.startswith("mid_"):
+        if "hum" in key:
+            return 2.6
         if key.endswith("_change_pct"):
             return 3.2
         if key.endswith("_avg") or key.endswith("_min"):
             return 0.0010
 
     if key.startswith("late_"):
+        if "hum" in key:
+            return 1.4
         if key.endswith("_change_pct"):
             return 1.2
         if key.endswith("_avg") or key.endswith("_min"):
@@ -820,6 +923,21 @@ def key_scale(key):
     if key in ["evap_drop_pct", "evap_mid_pct"]:
         return 2.6
 
+    if key in ["gas_step_score"]:
+        return 90.0
+
+    if key in ["gas_smooth_score"]:
+        return 140.0
+
+    if key in ["gas_slope_avg"]:
+        return 0.004
+
+    if key in ["gas_slope_stdev"]:
+        return 0.003
+
+    if key in ["gas_direction_changes"]:
+        return 0.08
+
     if key.endswith("_change_pct") or key.endswith("_vs_start_pct") or key.endswith("_vs_early_pct"):
         return 2.3
 
@@ -830,7 +948,7 @@ def key_scale(key):
         if "temp" in key:
             return 0.25
         if "hum" in key:
-            return 0.18
+            return 2.0
         if "press" in key:
             return 0.04
         if "gas_range" in key:
@@ -840,14 +958,14 @@ def key_scale(key):
         return 0.00075
 
     if key.endswith("_stdev"):
+        if "hum" in key:
+            return 1.8
         if "gas_range" in key:
             return 6.0
         if "gas_adc" in key:
             return 0.03
         if "temp" in key:
             return 0.2
-        if "hum" in key:
-            return 0.15
         return 0.0009
 
     if "time_to_min_ratio" in key:
@@ -917,6 +1035,9 @@ def env_weight(feature, sample):
 
     if sample.get("period") == feature.get("period"):
         w *= 1.08
+
+    if sample.get("level") == feature.get("level"):
+        w *= 1.1
 
     return w
 
@@ -1177,24 +1298,11 @@ class App:
 
         win = tk.Toplevel(self.root)
         win.title("학습 선택")
-        win.geometry("480x430")
+        win.geometry("500x560")
         win.configure(bg=self.bg)
 
-        tk.Label(
-            win,
-            text="학습 메뉴",
-            bg=self.bg,
-            fg=self.text,
-            font=("NanumGothic", 18, "bold"),
-        ).pack(pady=14)
-
-        tk.Label(
-            win,
-            text="IPA/에탄올은 0.05mL 기준 5분 기록입니다.",
-            bg=self.bg,
-            fg=self.muted,
-            font=("NanumGothic", 11, "bold"),
-        ).pack(pady=4)
+        tk.Label(win, text="학습 메뉴", bg=self.bg, fg=self.text, font=("NanumGothic", 18, "bold")).pack(pady=14)
+        tk.Label(win, text="IPA/에탄올은 0.05mL / HIGH 각각 5분 기록입니다.", bg=self.bg, fg=self.muted, font=("NanumGothic", 11, "bold")).pack(pady=4)
 
         for preset in TRAIN_PRESETS:
             tk.Button(
@@ -1220,13 +1328,7 @@ class App:
         win.geometry("390x260")
         win.configure(bg=self.bg)
 
-        tk.Label(
-            win,
-            text="판별 방식을 선택하세요",
-            bg=self.bg,
-            fg=self.text,
-            font=("NanumGothic", 16, "bold"),
-        ).pack(pady=18)
+        tk.Label(win, text="판별 방식을 선택하세요", bg=self.bg, fg=self.text, font=("NanumGothic", 16, "bold")).pack(pady=18)
 
         rt_text = "실시간 판별 끄기" if self.realtime_detect else "실시간 판별 켜기"
 
@@ -1291,10 +1393,7 @@ class App:
             messagebox.showinfo("안내", "이미 초기 안정화가 끝난 상태입니다.")
             return
 
-        if not messagebox.askyesno(
-            "초기 안정화 건너뛰기",
-            "초기 안정화를 건너뛰고 바로 AIR 기준 기록을 시작할까요?\n\n센서가 충분히 예열되지 않았으면 AIR 기준이 흔들릴 수 있습니다."
-        ):
+        if not messagebox.askyesno("초기 안정화 건너뛰기", "초기 안정화를 건너뛰고 바로 AIR 기준 기록을 시작할까요?\n\n센서가 충분히 예열되지 않았으면 AIR 기준이 흔들릴 수 있습니다."):
             return
 
         self.startup_warmup_active = False
@@ -1303,14 +1402,7 @@ class App:
         self.baseline_buffer = []
         self.baseline_started_at = None
 
-        self.show_notice(
-            "초기 안정화 건너뜀",
-            "자동 AIR 기준 30분 기록을 시작합니다",
-            remain=None,
-            color=self.notice_green,
-            sub="테스트용 기능입니다. 정식 학습 전에는 충분한 예열을 권장합니다.",
-        )
-
+        self.show_notice("초기 안정화 건너뜀", "자동 AIR 기준 30분 기록을 시작합니다", remain=None, color=self.notice_green, sub="테스트용 기능입니다.")
         self.root.after(3000, self.hide_notice)
         self.update_status("초기 안정화 건너뜀 / AIR 기준 시작")
 
@@ -1360,27 +1452,18 @@ class App:
     def is_blocked(self):
         if self.startup_warmup_active:
             remain = max(0, int(self.startup_warmup_until - time.time()))
-            messagebox.showinfo(
-                "초기 안정화 중",
-                f"센서 초기 안정화 중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초\n\n테스트 목적이면 상단의 안정화건너뛰기 버튼을 사용할 수 있습니다."
-            )
+            messagebox.showinfo("초기 안정화 중", f"센서 초기 안정화 중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초")
             return True
 
         if self.cooldown_active:
             remain = max(0, int(self.cooldown_until - time.time()))
 
             if remain > 0:
-                messagebox.showinfo(
-                    "쿨타임 중",
-                    f"시료 잔류 제거 대기중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초"
-                )
+                messagebox.showinfo("쿨타임 중", f"시료 잔류 제거 대기중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초")
                 return True
 
             if not self.is_air_recovered():
-                messagebox.showinfo(
-                    "회복 대기",
-                    "쿨타임은 끝났지만 아직 AIR 기준 범위로 회복되지 않았습니다.\n환기 후 다시 시도하세요."
-                )
+                messagebox.showinfo("회복 대기", "쿨타임은 끝났지만 아직 AIR 기준 범위로 회복되지 않았습니다.")
                 return True
 
             self.cooldown_active = False
@@ -1416,13 +1499,7 @@ class App:
         if remain > 0:
             self.auto_baseline = False
             self.baseline_started_at = None
-            self.show_notice(
-                "초기 안정화 중",
-                "센서 예열 및 주변 공기 안정화 대기",
-                remain=remain,
-                color=self.notice_blue,
-                sub="이 시간 동안 학습 / 판별 / 자동 AIR 기준 저장은 차단됩니다.",
-            )
+            self.show_notice("초기 안정화 중", "센서 예열 및 주변 공기 안정화 대기", remain=remain, color=self.notice_blue, sub="학습 / 판별 / 자동 AIR 기준 저장 차단")
             self.update_status("초기 안정화 대기중")
             return
 
@@ -1431,13 +1508,7 @@ class App:
         self.baseline_buffer = []
         self.baseline_started_at = None
 
-        self.show_notice(
-            "초기 안정화 완료",
-            "자동 AIR 기준 30분 기록을 시작합니다",
-            remain=None,
-            color=self.notice_green,
-            sub="정상공기 상태에서 히터 5단계 정밀 AIR 데이터가 쌓입니다.",
-        )
+        self.show_notice("초기 안정화 완료", "자동 AIR 기준 30분 기록을 시작합니다", remain=None, color=self.notice_green, sub="정상공기 상태 유지")
         self.root.after(3000, self.hide_notice)
         self.update_status("초기 안정화 완료 / AIR 기준 기록 시작")
 
@@ -1455,14 +1526,7 @@ class App:
         self.cards["현재상태"].config(text="시료 잔류 제거 대기", fg="#FFD166")
         self.cards["판별확률"].config(text="-")
 
-        self.show_notice(
-            "시료 잔류 제거 대기",
-            "시료를 치우고 충분히 환기하세요",
-            remain=COOLDOWN_SEC,
-            color=self.notice_yellow,
-            sub="쿨타임 중에는 학습 / 판별 / 자동 AIR 기준 기록이 잠깁니다.",
-        )
-
+        self.show_notice("시료 잔류 제거 대기", "시료를 치우고 충분히 환기하세요", remain=COOLDOWN_SEC, color=self.notice_yellow, sub="쿨타임 중 학습 / 판별 / AIR 기록 차단")
         self.update_status(f"{reason} 후 쿨타임 시작")
 
     def is_air_recovered(self):
@@ -1495,13 +1559,7 @@ class App:
         remain = int(self.cooldown_until - time.time())
 
         if remain > 0:
-            self.show_notice(
-                "시료 잔류 제거 대기",
-                "시료를 제거하고 환기하세요",
-                remain=remain,
-                color=self.notice_yellow,
-                sub="쿨타임 중에는 학습 / 판별 / 자동 AIR 기준 기록이 차단됩니다.",
-            )
+            self.show_notice("시료 잔류 제거 대기", "시료를 제거하고 환기하세요", remain=remain, color=self.notice_yellow, sub="쿨타임 중")
             self.update_status("시료 잔류 제거 대기중")
             return
 
@@ -1512,27 +1570,14 @@ class App:
             self.baseline_buffer = []
             self.baseline_started_at = None
 
-            self.show_notice(
-                "회복 완료",
-                "정상 공기 범위로 돌아왔습니다",
-                remain=None,
-                color=self.notice_green,
-                sub="자동 AIR 기준 30분 기록을 다시 시작합니다.",
-            )
-
+            self.show_notice("회복 완료", "정상 공기 범위로 돌아왔습니다", remain=None, color=self.notice_green, sub="자동 AIR 기준 재시작")
             self.cards["현재상태"].config(text="회복 완료 / AIR 기록 가능", fg="#4DFF88")
             self.update_status("회복 완료 / AIR 기준 재개")
             self.root.after(3000, self.hide_notice)
         else:
             self.auto_baseline = False
             self.baseline_started_at = None
-            self.show_notice(
-                "쿨타임 종료 / 아직 미회복",
-                "AIR 기준 범위로 돌아오지 않았습니다\n계속 환기하세요",
-                remain=None,
-                color=self.notice_orange,
-                sub="회복 전까지 학습 / 판별 / 자동 AIR 기준 기록이 차단됩니다.",
-            )
+            self.show_notice("쿨타임 종료 / 아직 미회복", "AIR 기준 범위로 돌아오지 않았습니다\n계속 환기하세요", remain=None, color=self.notice_orange, sub="회복 전까지 차단")
             self.cards["현재상태"].config(text="쿨타임 종료 / 아직 미회복", fg="#FFD166")
             self.update_status("AIR 기준 범위 미회복")
 
@@ -1578,14 +1623,7 @@ class App:
             msg = "아직 시료를 주입하지 마세요"
             sub = f"준비 후 안내가 뜨면 {guide}"
 
-        self.show_notice(
-            f"{label_korean(label)} {level} 학습 준비",
-            msg,
-            remain=READY_SEC,
-            color=self.notice_blue,
-            sub=sub,
-        )
-
+        self.show_notice(f"{label_korean(label)} {level} 학습 준비", msg, remain=READY_SEC, color=self.notice_blue, sub=sub)
         self.update_status(f"{label} {level} 학습 준비")
 
     def start_unknown(self, duration_sec):
@@ -1614,35 +1652,16 @@ class App:
         self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
         self.training_cycle_count = 0
 
-        self.show_notice(
-            "미지시료 판별 준비",
-            "아직 시료를 주입하지 마세요",
-            remain=READY_SEC,
-            color=self.notice_blue,
-            sub="준비가 끝나면 미지시료를 일정하게 주입하세요.",
-        )
-
+        self.show_notice("미지시료 판별 준비", "아직 시료를 주입하지 마세요", remain=READY_SEC, color=self.notice_blue, sub="준비가 끝나면 미지시료를 일정하게 주입하세요.")
         self.update_status("미지시료 판별 준비")
 
     def finish_sample(self):
-        feature = extract_features(
-            self.sample_rows,
-            self.pending_label,
-            self.pending_level,
-            self.pending_amount_ml,
-            self.latest_air_gas,
-        )
+        feature = extract_features(self.sample_rows, self.pending_label, self.pending_level, self.pending_amount_ml, self.latest_air_gas)
 
         if not feature:
             self.update_status("샘플 실패")
             self.sample_mode = None
-            self.show_notice(
-                "샘플 실패",
-                "유효한 데이터가 부족합니다",
-                remain=None,
-                color=self.notice_red,
-                sub="히터 안정화 이후 유효 데이터가 부족합니다.",
-            )
+            self.show_notice("샘플 실패", "유효한 데이터가 부족합니다", remain=None, color=self.notice_red, sub="히터 안정화 이후 유효 데이터 부족")
             self.root.after(3000, self.hide_notice)
             return
 
@@ -1652,35 +1671,15 @@ class App:
 
         if finished_mode == "LEARN":
             save_dict_csv(SAMPLES_CSV, feature)
-            self.cards["현재상태"].config(
-                text=f"{label_korean(finished_label)} {finished_level} 학습완료",
-                fg="#4DFF88",
-            )
-
+            self.cards["현재상태"].config(text=f"{label_korean(finished_label)} {finished_level} 학습완료", fg="#4DFF88")
             sub = "시료를 제거하고 회복 단계로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료"
-            self.show_notice(
-                f"{label_korean(finished_label)} {finished_level} 학습 완료",
-                "5분 패턴 feature가 저장되었습니다",
-                remain=None,
-                color=self.notice_green,
-                sub=sub,
-            )
+            self.show_notice(f"{label_korean(finished_label)} {finished_level} 학습 완료", "패턴 feature가 저장되었습니다", remain=None, color=self.notice_green, sub=sub)
             self.update_status(f"{finished_label} {finished_level} 학습 저장 완료")
-
         else:
             pct, winner = classify(feature)
             self.cards["현재상태"].config(text=f"{label_korean(winner)}", fg="#FFD166")
-            self.cards["판별확률"].config(
-                text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
-            )
-
-            self.show_notice(
-                "수동 판별 완료",
-                f"결과: {label_korean(winner)}",
-                remain=None,
-                color=self.notice_green,
-                sub=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%",
-            )
+            self.cards["판별확률"].config(text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%")
+            self.show_notice("수동 판별 완료", f"결과: {label_korean(winner)}", remain=None, color=self.notice_green, sub=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%")
             self.update_status("수동 판별 완료")
 
         self.sample_mode = None
@@ -1745,31 +1744,16 @@ class App:
             color = "#00E5FF"
 
         self.cards["현재상태"].config(text=f"{state} {best_pct:.1f}%", fg=color)
-        self.cards["판별확률"].config(
-            text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
-        )
+        self.cards["판별확률"].config(text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%")
 
     def show_data_manager(self):
         win = tk.Toplevel(self.root)
         win.title("데이터 관리")
-        win.geometry("1420x800")
+        win.geometry("1460x820")
         win.configure(bg=self.bg)
 
-        tk.Label(
-            win,
-            text="데이터 관리",
-            bg=self.bg,
-            fg=self.text,
-            font=("NanumGothic", 18, "bold"),
-        ).pack(pady=8)
-
-        tk.Label(
-            win,
-            text=f"저장폴더: {os.path.abspath(DATA_DIR)}",
-            bg=self.bg,
-            fg=self.text,
-            font=("NanumGothic", 11),
-        ).pack(pady=4)
+        tk.Label(win, text="데이터 관리", bg=self.bg, fg=self.text, font=("NanumGothic", 18, "bold")).pack(pady=8)
+        tk.Label(win, text=f"저장폴더: {os.path.abspath(DATA_DIR)}", bg=self.bg, fg=self.text, font=("NanumGothic", 11)).pack(pady=4)
 
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1783,24 +1767,18 @@ class App:
         self.build_table_tab(tab_samples, SAMPLES_CSV, "판별용 학습 데이터")
         self.build_table_tab(tab_baseline, BASELINE_CSV, "자동 AIR 기준 원본")
 
-        tk.Button(
-            win,
-            text="닫기",
-            command=win.destroy,
-            font=("NanumGothic", 12, "bold"),
-            padx=18,
-            pady=7,
-        ).pack(side="right", padx=14, pady=8)
+        tk.Button(win, text="닫기", command=win.destroy, font=("NanumGothic", 12, "bold"), padx=18, pady=7).pack(side="right", padx=14, pady=8)
 
     def build_table_tab(self, parent, csv_path, title):
         columns = (
             "id", "timestamp", "label", "level", "amount_ml", "sample_sec", "count",
             "gas_change_pct", "gas_avg", "gas_min", "gas_max",
-            "evap_weighted_gas_avg", "evap_drop_pct", "evap_mid_pct",
+            "gas_step_score", "gas_smooth_score",
+            "hum_rise_abs", "hum_rise_pct", "hum_time_to_max_ratio",
+            "evap_weighted_gas_avg", "evap_drop_pct",
             "early_gas_avg", "mid_gas_avg", "late_gas_avg",
-            "h1_low_avg_ratio_to_h5", "h2_low2_avg_ratio_to_h5",
-            "h3_low3_avg_ratio_to_h5", "h4_low4_avg_ratio_to_h5",
-            "gas_range_avg", "temp_avg", "hum_avg", "press_avg"
+            "hum_early_avg", "hum_mid_avg", "hum_late_avg",
+            "temp_avg", "hum_avg", "press_avg"
         )
 
         frame = tk.Frame(parent, bg=self.bg)
@@ -1821,21 +1799,23 @@ class App:
             "amount_ml": "mL",
             "sample_sec": "초",
             "count": "개수",
-            "gas_change_pct": "변화%",
+            "gas_change_pct": "가스변화%",
             "gas_avg": "평균Ω",
             "gas_min": "최저Ω",
             "gas_max": "최고Ω",
+            "gas_step_score": "계단점수",
+            "gas_smooth_score": "부드러움",
+            "hum_rise_abs": "습도상승",
+            "hum_rise_pct": "습도상승%",
+            "hum_time_to_max_ratio": "습도피크",
             "evap_weighted_gas_avg": "증발보정Ω",
             "evap_drop_pct": "후/초%",
-            "evap_mid_pct": "중/초%",
             "early_gas_avg": "초반Ω",
             "mid_gas_avg": "중반Ω",
             "late_gas_avg": "후반Ω",
-            "h1_low_avg_ratio_to_h5": "H1/H5",
-            "h2_low2_avg_ratio_to_h5": "H2/H5",
-            "h3_low3_avg_ratio_to_h5": "H3/H5",
-            "h4_low4_avg_ratio_to_h5": "H4/H5",
-            "gas_range_avg": "Range",
+            "hum_early_avg": "초반습도",
+            "hum_mid_avg": "중반습도",
+            "hum_late_avg": "후반습도",
             "temp_avg": "온도",
             "hum_avg": "습도",
             "press_avg": "기압",
@@ -1843,16 +1823,9 @@ class App:
 
         for c in columns:
             tree.heading(c, text=headings.get(c, c))
-            tree.column(c, width=76, anchor="center")
+            tree.column(c, width=78, anchor="center")
 
-        detail = tk.Text(
-            parent,
-            height=9,
-            bg="#0B1218",
-            fg=self.text,
-            insertbackground=self.text,
-            font=("NanumGothic", 10),
-        )
+        detail = tk.Text(parent, height=9, bg="#0B1218", fg=self.text, insertbackground=self.text, font=("NanumGothic", 10))
         detail.pack(fill="x", padx=8, pady=8)
 
         def fmt_value(c, v):
@@ -1861,20 +1834,16 @@ class App:
             if fv is None:
                 return v
 
-            if c in [
-                "gas_avg", "gas_min", "gas_max",
-                "early_gas_avg", "mid_gas_avg", "late_gas_avg",
-                "evap_weighted_gas_avg"
-            ]:
+            if c in ["gas_avg", "gas_min", "gas_max", "early_gas_avg", "mid_gas_avg", "late_gas_avg", "evap_weighted_gas_avg"]:
                 return f"{fv:,.0f}"
 
-            if "ratio" in c:
+            if "ratio" in c or "score" in c:
                 return f"{fv:.3f}"
 
-            if "pct" in c or "temp" in c or "hum" in c or "range" in c or "press" in c:
+            if "pct" in c or "temp" in c or "hum" in c or "press" in c:
                 return f"{fv:.1f}"
 
-            if c == "sample_sec":
+            if c in ["sample_sec", "count"]:
                 return f"{fv:.0f}"
 
             return str(v)
@@ -1998,9 +1967,7 @@ class App:
                 if row.get("recordable"):
                     self.detect_rows.append(row)
 
-                self.cards["히터단계"].config(
-                    text=f"{heater_name} {'기록' if row.get('recordable') else '안정화'}"
-                )
+                self.cards["히터단계"].config(text=f"{heater_name} {'기록' if row.get('recordable') else '안정화'}")
 
                 can_record_air_baseline = (
                     self.auto_baseline
@@ -2021,13 +1988,7 @@ class App:
                     elapsed = time.time() - self.baseline_started_at
 
                     if elapsed >= AUTO_BASELINE_SEC:
-                        feature = extract_features(
-                            self.baseline_buffer,
-                            "AUTO_AIR_BASELINE",
-                            "AUTO",
-                            "0",
-                            None,
-                        )
+                        feature = extract_features(self.baseline_buffer, "AUTO_AIR_BASELINE", "AUTO", "0", None)
 
                         if feature and int(feature.get("count", 0)) >= AUTO_BASELINE_MIN_VALID_ROWS:
                             save_ok, save_reason = should_save_air_baseline(feature)
@@ -2049,23 +2010,11 @@ class App:
                                     save_dict_csv(SAMPLES_CSV, air_feature)
                                     trim_auto_air_samples()
 
-                                self.show_notice(
-                                    "자동 AIR 기준 저장 완료",
-                                    "새로운 AIR 조건으로 저장되었습니다",
-                                    remain=None,
-                                    color=self.notice_green,
-                                    sub=save_reason,
-                                )
+                                self.show_notice("자동 AIR 기준 저장 완료", "새로운 AIR 조건으로 저장되었습니다", remain=None, color=self.notice_green, sub=save_reason)
                                 self.root.after(3000, self.hide_notice)
                                 self.update_status("AIR 기준 저장 완료")
                             else:
-                                self.show_notice(
-                                    "자동 AIR 기준 저장 생략",
-                                    "기존 AIR와 비슷한 조건입니다",
-                                    remain=None,
-                                    color=self.notice_blue,
-                                    sub=save_reason,
-                                )
+                                self.show_notice("자동 AIR 기준 저장 생략", "기존 AIR와 비슷한 조건입니다", remain=None, color=self.notice_blue, sub=save_reason)
                                 self.root.after(3000, self.hide_notice)
                                 self.update_status("AIR 기준 저장 생략")
                         else:
@@ -2086,32 +2035,19 @@ class App:
 
                             if self.pending_label == "AIR":
                                 message = "정상공기 상태를 그대로 유지하세요"
-                                sub = "시료를 넣지 않습니다. 히터 5단계가 반복됩니다."
+                                sub = "시료를 넣지 않습니다."
                             elif self.pending_label == "UNKNOWN":
                                 message = "미지시료를 센서 챔버로\n일정하게 주입하세요"
                                 sub = "5분 동안 판별용 패턴을 기록합니다."
                             else:
                                 message = self.pending_guide
-                                sub = "시료 증발을 감안해 초반/중반/후반 패턴을 분리 기록합니다."
+                                sub = "가스저항 + 습도 변화 + 계단형 패턴을 함께 기록합니다."
 
-                            self.show_notice(
-                                f"{label_korean(self.pending_label)} {self.pending_level} 기록 중",
-                                message,
-                                remain=int(self.train_duration),
-                                color=self.notice_orange,
-                                sub=sub,
-                            )
-
+                            self.show_notice(f"{label_korean(self.pending_label)} {self.pending_level} 기록 중", message, remain=int(self.train_duration), color=self.notice_orange, sub=sub)
                             self.update_status(f"{self.pending_label} {self.pending_level} 기록 시작")
                         else:
                             msg = "정상공기 상태 유지" if self.pending_label == "AIR" else "아직 시료를 주입하지 마세요"
-                            self.show_notice(
-                                f"{label_korean(self.pending_label)} {self.pending_level} 준비",
-                                msg,
-                                remain=remain,
-                                color=self.notice_blue,
-                                sub="준비 시간이 끝나면 기록이 시작됩니다.",
-                            )
+                            self.show_notice(f"{label_korean(self.pending_label)} {self.pending_level} 준비", msg, remain=remain, color=self.notice_blue, sub="준비 시간이 끝나면 기록이 시작됩니다.")
                             self.update_status(f"{self.pending_label} 준비 {remain}초")
 
                     elif self.sample_phase == "EXPOSE":
@@ -2125,14 +2061,7 @@ class App:
                                 self.sample_phase = "RECOVER"
                                 self.phase_until = now + RECOVER_SEC
 
-                                self.show_notice(
-                                    "회복 단계",
-                                    "시료를 제거하고\n충분히 환기하세요",
-                                    remain=RECOVER_SEC,
-                                    color=self.notice_green,
-                                    sub="회복 구간 데이터는 학습에 저장하지 않습니다.",
-                                )
-
+                                self.show_notice("회복 단계", "시료를 제거하고\n충분히 환기하세요", remain=RECOVER_SEC, color=self.notice_green, sub="회복 구간 데이터는 학습에 저장하지 않습니다.")
                                 self.update_status(f"{self.pending_label} 회복 단계")
                             else:
                                 self.finish_sample()
@@ -2146,13 +2075,7 @@ class App:
 
                             step_status = "기록중" if row.get("recordable") else "히터 안정화중"
                             cycle_text = f"히터: {heater_name} / {step_status} / 사이클: {self.training_cycle_count}"
-                            self.show_notice(
-                                f"{label_korean(self.pending_label)} {self.pending_level} 기록 중",
-                                message,
-                                remain=remain,
-                                color=self.notice_orange,
-                                sub=cycle_text,
-                            )
+                            self.show_notice(f"{label_korean(self.pending_label)} {self.pending_level} 기록 중", message, remain=remain, color=self.notice_orange, sub=cycle_text)
                             self.update_status(f"{self.pending_label} 기록 {remain // 60:02d}:{remain % 60:02d}")
 
                     elif self.sample_phase == "RECOVER":
@@ -2161,15 +2084,8 @@ class App:
                         if remain <= 0:
                             self.finish_sample()
                         else:
-                            self.show_notice(
-                                "회복 단계",
-                                "시료를 제거하고\n충분히 환기하세요",
-                                remain=remain,
-                                color=self.notice_green,
-                                sub="회복 데이터는 학습에 저장하지 않습니다.",
-                            )
+                            self.show_notice("회복 단계", "시료를 제거하고\n충분히 환기하세요", remain=remain, color=self.notice_green, sub="회복 데이터는 학습에 저장하지 않습니다.")
                             self.update_status(f"{self.pending_label} 회복 {remain // 60:02d}:{remain % 60:02d}")
-
                 else:
                     if self.realtime_detect and not self.cooldown_active and not self.startup_warmup_active:
                         self.run_realtime_detect()
@@ -2178,13 +2094,7 @@ class App:
 
             except Exception as e:
                 self.update_status(f"오류: {e}")
-                self.show_notice(
-                    "오류 발생",
-                    str(e),
-                    remain=None,
-                    color=self.notice_red,
-                    sub="센서 연결 또는 코드 상태를 확인하세요.",
-                )
+                self.show_notice("오류 발생", str(e), remain=None, color=self.notice_red, sub="센서 연결 또는 코드 상태를 확인하세요.")
 
             time.sleep(0.4)
 
@@ -2233,13 +2143,7 @@ class App:
             self.ax_env.set_xlabel("시간 (초)")
             self.ax_env.legend(facecolor=self.card, edgecolor="#314452", labelcolor=self.text)
 
-            self.fig.suptitle(
-                "BME688 5분 패턴 학습: AIR / IPA 0.05mL / ETH 0.05mL",
-                color=self.text,
-                fontsize=15,
-                fontweight="bold",
-            )
-
+            self.fig.suptitle("BME688 패턴 학습: AIR / IPA LOW,HIGH / ETH LOW,HIGH", color=self.text, fontsize=15, fontweight="bold")
             self.fig.tight_layout()
             self.canvas.draw_idle()
 
