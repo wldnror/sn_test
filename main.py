@@ -468,6 +468,18 @@ def classify(feature):
     return pct, winner
 
 
+def label_korean(label):
+    if label == "AIR":
+        return "정상공기"
+    if label == "ETHANOL":
+        return "에탄올"
+    if label == "IPA":
+        return "IPA"
+    if label == "UNKNOWN":
+        return "미지시료"
+    return label
+
+
 # =========================================================
 # APP
 # =========================================================
@@ -508,6 +520,12 @@ class App:
         self.card = "#182632"
         self.text = "#EAF2F8"
         self.muted = "#94A9B8"
+
+        self.notice_blue = "#0066CC"
+        self.notice_orange = "#D35400"
+        self.notice_green = "#008855"
+        self.notice_yellow = "#B8860B"
+        self.notice_red = "#B00020"
 
         self.root.configure(bg=self.bg)
 
@@ -575,12 +593,91 @@ class App:
 
             self.cards[name] = value
 
+        self.plot_area = tk.Frame(self.root, bg=self.bg)
+        self.plot_area.pack(fill="both", expand=True, padx=12, pady=8)
+
         self.fig = plt.Figure(figsize=(14, 7), facecolor=self.bg)
         self.ax_gas = self.fig.add_subplot(2, 1, 1)
         self.ax_env = self.fig.add_subplot(2, 1, 2)
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=12, pady=8)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_area)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        self.build_notice_overlay()
+
+    def build_notice_overlay(self):
+        self.notice_frame = tk.Frame(
+            self.root,
+            bg=self.notice_blue,
+            bd=6,
+            relief="ridge",
+        )
+
+        self.notice_title = tk.Label(
+            self.notice_frame,
+            text="",
+            bg=self.notice_blue,
+            fg="white",
+            font=("NanumGothic", 34, "bold"),
+            padx=40,
+            pady=16,
+        )
+        self.notice_title.pack(fill="x")
+
+        self.notice_message = tk.Label(
+            self.notice_frame,
+            text="",
+            bg=self.notice_blue,
+            fg="white",
+            font=("NanumGothic", 24, "bold"),
+            padx=40,
+            pady=12,
+            justify="center",
+        )
+        self.notice_message.pack(fill="x")
+
+        self.notice_timer = tk.Label(
+            self.notice_frame,
+            text="",
+            bg=self.notice_blue,
+            fg="white",
+            font=("NanumGothic", 40, "bold"),
+            padx=40,
+            pady=16,
+        )
+        self.notice_timer.pack(fill="x")
+
+        self.notice_sub = tk.Label(
+            self.notice_frame,
+            text="",
+            bg=self.notice_blue,
+            fg="white",
+            font=("NanumGothic", 16, "bold"),
+            padx=40,
+            pady=10,
+        )
+        self.notice_sub.pack(fill="x")
+
+        self.hide_notice()
+
+    def show_notice(self, title, message, remain=None, color=None, sub=""):
+        if color is None:
+            color = self.notice_blue
+
+        self.notice_frame.configure(bg=color)
+        self.notice_title.configure(text=title, bg=color)
+        self.notice_message.configure(text=message, bg=color)
+        self.notice_sub.configure(text=sub, bg=color)
+
+        if remain is None:
+            self.notice_timer.configure(text="", bg=color)
+        else:
+            self.notice_timer.configure(text=f"남은 시간: {remain}초", bg=color)
+
+        self.notice_frame.place(relx=0.5, rely=0.48, anchor="center")
+
+    def hide_notice(self):
+        self.notice_frame.place_forget()
 
     # -----------------------------------------------------
     # POPUP MENUS
@@ -719,6 +816,7 @@ class App:
         if self.realtime_detect:
             self.auto_baseline = False
             self.baseline_buffer = []
+            self.hide_notice()
             self.cards["현재상태"].config(text="실시간 판별중", fg="#00E5FF")
             self.update_status("실시간 판별 ON / AIR 기준 기록 자동 OFF")
         else:
@@ -742,6 +840,14 @@ class App:
 
         self.cards["현재상태"].config(text="시료 잔류 제거 대기", fg="#FFD166")
         self.cards["판별확률"].config(text="-")
+
+        self.show_notice(
+            "시료 잔류 제거 대기",
+            "시료를 치우고 충분히 환기하세요",
+            remain=self.COOLDOWN_SEC,
+            color=self.notice_yellow,
+            sub="쿨타임 중에는 학습 / 판별 / 자동 AIR 기준 기록이 잠깁니다.",
+        )
 
         self.update_status(f"{reason} 후 쿨타임 시작 / 학습·판별·AIR기준 기록 잠금")
 
@@ -775,7 +881,14 @@ class App:
         remain = int(self.cooldown_until - time.time())
 
         if remain > 0:
-            self.update_status(f"시료 잔류 제거 대기중")
+            self.show_notice(
+                "시료 잔류 제거 대기",
+                "시료를 제거하고 환기하세요",
+                remain=remain,
+                color=self.notice_yellow,
+                sub="쿨타임 중에는 학습 / 판별 / 자동 AIR 기준 기록이 차단됩니다.",
+            )
+            self.update_status("시료 잔류 제거 대기중")
             return
 
         if self.is_air_recovered():
@@ -783,10 +896,29 @@ class App:
             self.cooldown_reason = ""
             self.auto_baseline = True
             self.baseline_buffer = []
+
+            self.show_notice(
+                "회복 완료",
+                "정상 공기 범위로 돌아왔습니다",
+                remain=None,
+                color=self.notice_green,
+                sub="자동 AIR 기준 기록을 다시 시작합니다.",
+            )
+
             self.cards["현재상태"].config(text="회복 완료 / AIR 기록 가능", fg="#4DFF88")
             self.update_status("회복 완료 / 자동 AIR 기준 기록 재개")
+            self.root.after(3000, self.hide_notice)
         else:
             self.auto_baseline = False
+
+            self.show_notice(
+                "쿨타임 종료 / 아직 미회복",
+                "AIR 기준 범위로 돌아오지 않았습니다\n계속 환기하세요",
+                remain=None,
+                color=self.notice_orange,
+                sub="회복 전까지 학습 / 판별 / 자동 AIR 기준 기록이 차단됩니다.",
+            )
+
             self.cards["현재상태"].config(text="쿨타임 종료 / 아직 미회복", fg="#FFD166")
             self.update_status("쿨타임 종료 / AIR 기준 범위 미회복")
 
@@ -837,6 +969,14 @@ class App:
         self.sample_phase = "READY"
         self.phase_until = time.time() + 5
 
+        self.show_notice(
+            f"{label_korean(label)} 학습 준비",
+            "아직 시료를 넣지 마세요",
+            remain=5,
+            color=self.notice_blue,
+            sub="준비가 끝나면 노출 안내가 표시됩니다.",
+        )
+
         self.update_status(f"{label} 학습 준비 5초 / AIR 기준 기록 일시정지")
 
     def start_unknown(self):
@@ -853,6 +993,14 @@ class App:
         self.sample_phase = "READY"
         self.phase_until = time.time() + 5
 
+        self.show_notice(
+            "미지시료 판별 준비",
+            "아직 시료를 넣지 마세요",
+            remain=5,
+            color=self.notice_blue,
+            sub="준비가 끝나면 노출 안내가 표시됩니다.",
+        )
+
         self.update_status("미지시료 수동 판별 준비 5초 / AIR 기준 기록 일시정지")
 
     def finish_sample(self):
@@ -861,14 +1009,30 @@ class App:
         if not feature:
             self.update_status("샘플 실패")
             self.sample_mode = None
+            self.show_notice(
+                "샘플 실패",
+                "유효한 데이터가 부족합니다",
+                remain=None,
+                color=self.notice_red,
+                sub="센서 상태를 확인하고 다시 시도하세요.",
+            )
+            self.root.after(3000, self.hide_notice)
             return
 
         finished_label = self.pending_label
-        finished_mode = self.sample_mode
 
         if self.sample_mode == "LEARN":
             save_dict_csv(SAMPLES_CSV, feature)
-            self.cards["현재상태"].config(text=f"{finished_label} 학습완료", fg="#4DFF88")
+            self.cards["현재상태"].config(text=f"{label_korean(finished_label)} 학습완료", fg="#4DFF88")
+
+            self.show_notice(
+                f"{label_korean(finished_label)} 학습 완료",
+                "학습 데이터가 저장되었습니다",
+                remain=None,
+                color=self.notice_green,
+                sub="시료 잔류 제거 쿨타임으로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료",
+            )
+
             self.update_status(f"{finished_label} 학습 저장 완료")
         else:
             pct, winner = classify(feature)
@@ -876,6 +1040,15 @@ class App:
             self.cards["판별확률"].config(
                 text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
             )
+
+            self.show_notice(
+                "수동 판별 완료",
+                f"결과: {label_korean(winner)}",
+                remain=None,
+                color=self.notice_green,
+                sub=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%",
+            )
+
             self.update_status("수동 판별 완료")
 
         self.sample_mode = None
@@ -884,10 +1057,11 @@ class App:
         self.sample_phase = None
 
         if finished_label in ["ETHANOL", "IPA", "UNKNOWN"]:
-            self.start_cooldown(finished_label)
+            self.root.after(1500, lambda: self.start_cooldown(finished_label))
         elif finished_label == "AIR":
             self.auto_baseline = True
             self.update_status("AIR 학습 완료 / 자동 AIR 기준 기록 재개")
+            self.root.after(3000, self.hide_notice)
 
     # -----------------------------------------------------
     # REALTIME CLASSIFY
@@ -1203,33 +1377,72 @@ class App:
                     now = time.time()
 
                     if self.sample_phase == "READY":
-                        remain = int(self.phase_until - now)
+                        remain = max(0, int(self.phase_until - now))
 
                         if remain <= 0:
                             self.sample_phase = "EXPOSE"
                             self.phase_until = now + 20
+
+                            self.show_notice(
+                                f"{label_korean(self.pending_label)} 노출 중",
+                                f"지금 {label_korean(self.pending_label)}를\n센서 가까이 가져가세요",
+                                remain=20,
+                                color=self.notice_orange,
+                                sub="이 구간의 데이터가 노출 반응으로 저장됩니다.",
+                            )
+
                             self.update_status(f"{self.pending_label} 노출 기록 20초")
                         else:
+                            self.show_notice(
+                                f"{label_korean(self.pending_label)} 준비",
+                                "아직 시료를 넣지 마세요",
+                                remain=remain,
+                                color=self.notice_blue,
+                                sub="준비가 끝나면 시료 노출 안내가 표시됩니다.",
+                            )
                             self.update_status(f"{self.pending_label} 준비 {remain}초")
 
                     elif self.sample_phase == "EXPOSE":
                         self.sample_rows.append(row)
-                        remain = int(self.phase_until - now)
+                        remain = max(0, int(self.phase_until - now))
 
                         if remain <= 0:
                             self.sample_phase = "RECOVER"
                             self.phase_until = now + 40
+
+                            self.show_notice(
+                                "회복 기록 중",
+                                "시료를 제거하고\n충분히 환기하세요",
+                                remain=40,
+                                color=self.notice_green,
+                                sub="이 구간의 데이터는 정상 공기로 돌아오는 패턴으로 저장됩니다.",
+                            )
+
                             self.update_status(f"{self.pending_label} 회복 기록 40초")
                         else:
+                            self.show_notice(
+                                f"{label_korean(self.pending_label)} 노출 중",
+                                f"지금 {label_korean(self.pending_label)}를\n센서 가까이 가져가세요",
+                                remain=remain,
+                                color=self.notice_orange,
+                                sub="20초가 끝나면 바로 시료를 치우세요.",
+                            )
                             self.update_status(f"{self.pending_label} 노출중 {remain}초")
 
                     elif self.sample_phase == "RECOVER":
                         self.sample_rows.append(row)
-                        remain = int(self.phase_until - now)
+                        remain = max(0, int(self.phase_until - now))
 
                         if remain <= 0:
                             self.finish_sample()
                         else:
+                            self.show_notice(
+                                "회복 기록 중",
+                                "시료를 제거하고\n충분히 환기하세요",
+                                remain=remain,
+                                color=self.notice_green,
+                                sub="회복 시간에는 시료를 계속 넣으면 안 됩니다.",
+                            )
                             self.update_status(f"{self.pending_label} 회복중 {remain}초")
 
                 else:
@@ -1240,6 +1453,13 @@ class App:
 
             except Exception as e:
                 self.update_status(f"오류: {e}")
+                self.show_notice(
+                    "오류 발생",
+                    str(e),
+                    remain=None,
+                    color=self.notice_red,
+                    sub="센서 연결 또는 코드 상태를 확인하세요.",
+                )
 
             time.sleep(0.4)
 
