@@ -27,22 +27,24 @@ BASELINE_CSV = os.path.join(DATA_DIR, "baseline_auto.csv")
 SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
 
-STARTUP_WARMUP_SEC = 600
-COOLDOWN_SEC = 600
-RECOVERY_TOL = 0.15
+STARTUP_WARMUP_SEC = 600       # 시작 후 10분 안정화
+COOLDOWN_SEC = 600             # 시료 후 10분 쿨타임
+RECOVERY_TOL = 0.15            # AIR 기준 ±15% 회복 판단
 CONFIDENCE_LIMIT = 70.0
 
-READY_SEC = 30
-RECOVER_SEC = 300
+READY_SEC = 30                 # 학습 전 준비 시간
+RECOVER_SEC = 300              # 시료 제거 후 회복 안내 시간
 
-AUTO_BASELINE_SEC = 1800
+AUTO_BASELINE_SEC = 1800       # 자동 AIR 30분
 AUTO_BASELINE_MIN_VALID_ROWS = 300
 AUTO_AIR_TO_SAMPLES = True
 
-TRAIN_SEC = 1800
+TRAIN_SEC = 1800               # 각 학습 30분
 
+
+# =========================================================
 # 단순 학습 메뉴
-# label은 판별용 최종 분류, level은 학습 조건 기록용
+# =========================================================
 TRAIN_PRESETS = [
     {
         "button": "정상공기 30분",
@@ -81,8 +83,11 @@ TRAIN_PRESETS = [
     },
 ]
 
+
+# =========================================================
 # 히터 5단계
 # 이름, res_heat 값, 단계 유지시간, 안정화 버림시간
+# =========================================================
 HEATER_STEPS = [
     ("H1_LOW",  0x45, 15, 4),
     ("H2_MID1", 0x55, 15, 4),
@@ -402,24 +407,15 @@ def stdev(values):
     return math.sqrt(sum((x - m) ** 2 for x in values) / (len(values) - 1))
 
 
-def save_dict_csv(path, row):
-    exists = os.path.exists(path)
-
-    with open(path, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-
-        if not exists:
-            writer.writeheader()
-
-        writer.writerow(row)
-
-
 def load_csv(path):
     if not os.path.exists(path):
         return []
 
-    with open(path, "r", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+    except Exception:
+        return []
 
 
 def write_csv(path, rows):
@@ -428,10 +424,45 @@ def write_csv(path, rows):
             os.remove(path)
         return
 
+    fieldnames = []
+
+    for r in rows:
+        for k in r.keys():
+            if k not in fieldnames:
+                fieldnames.append(k)
+
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def save_dict_csv(path, row):
+    exists = os.path.exists(path)
+
+    if not exists:
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()), extrasaction="ignore")
+            writer.writeheader()
+            writer.writerow(row)
+        return
+
+    with open(path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        old_fieldnames = reader.fieldnames or []
+
+    row_keys = list(row.keys())
+
+    same_header = all(k in old_fieldnames for k in row_keys)
+
+    if same_header:
+        with open(path, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=old_fieldnames, extrasaction="ignore")
+            writer.writerow(row)
+    else:
+        rows = load_csv(path)
+        rows.append(row)
+        write_csv(path, rows)
 
 
 def count_labels():
@@ -1310,10 +1341,10 @@ class App:
                 fg="#4DFF88",
             )
 
-            sub = "시료를 제거하고 회복 기록으로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료"
+            sub = "시료를 제거하고 회복 단계로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료"
             self.show_notice(
                 f"{label_korean(finished_label)} {finished_level} 학습 완료",
-                "히터 5단계 정밀학습 데이터가 저장되었습니다",
+                "노출 구간 데이터만 저장되었습니다",
                 remain=None,
                 color=self.notice_green,
                 sub=sub,
@@ -1754,14 +1785,14 @@ class App:
                                 self.phase_until = now + RECOVER_SEC
 
                                 self.show_notice(
-                                    "회복 기록 중",
+                                    "회복 단계",
                                     "시료를 제거하고\n충분히 환기하세요",
                                     remain=RECOVER_SEC,
                                     color=self.notice_green,
-                                    sub="회복 구간에는 시료를 계속 넣으면 안 됩니다.",
+                                    sub="회복 구간 데이터는 학습에 저장하지 않습니다.",
                                 )
 
-                                self.update_status(f"{self.pending_label} 회복 기록 시작")
+                                self.update_status(f"{self.pending_label} 회복 단계 시작")
                             else:
                                 self.finish_sample()
                         else:
@@ -1784,20 +1815,20 @@ class App:
                             self.update_status(f"{self.pending_label} 기록중 {remain // 60:02d}:{remain % 60:02d}")
 
                     elif self.sample_phase == "RECOVER":
-                        if row.get("recordable"):
-                            self.sample_rows.append(row)
-
+                        # 중요:
+                        # 회복 구간은 학습 데이터에 섞지 않는다.
+                        # sample_rows에는 노출 구간 데이터만 들어간다.
                         remain = max(0, int(self.phase_until - now))
 
                         if remain <= 0:
                             self.finish_sample()
                         else:
                             self.show_notice(
-                                "회복 기록 중",
+                                "회복 단계",
                                 "시료를 제거하고\n충분히 환기하세요",
                                 remain=remain,
                                 color=self.notice_green,
-                                sub="회복 시간에는 시료를 계속 넣으면 안 됩니다.",
+                                sub="회복 데이터는 학습에 저장하지 않습니다.",
                             )
                             self.update_status(f"{self.pending_label} 회복중 {remain // 60:02d}:{remain % 60:02d}")
 
