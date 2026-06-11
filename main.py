@@ -18,7 +18,44 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 # =========================================================
-# FONT
+# 기본 설정
+# =========================================================
+DATA_DIR = "bme688_data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+BASELINE_CSV = os.path.join(DATA_DIR, "baseline_auto.csv")
+SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
+RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
+
+STARTUP_WARMUP_SEC = 600        # 프로그램 시작 안정화 10분
+COOLDOWN_SEC = 600              # 시료 학습/판별 후 기본 쿨타임 10분
+RECOVERY_TOL = 0.15             # AIR 기준 대비 ±15% 회복 판단
+CONFIDENCE_LIMIT = 70.0         # 실시간 판별 확정 기준
+
+READY_SEC = 30                  # 정밀학습 전 준비 시간
+RECOVER_SEC = 300               # 정밀학습 후 회복 기록 5분
+
+# 정밀학습 시간 선택용
+TRAIN_DURATIONS = [
+    ("빠른 테스트 2분", 120),
+    ("정밀학습 10분", 600),
+    ("정밀학습 20분", 1200),
+    ("정밀학습 30분", 1800),
+]
+
+# 빠른 실험용 히터 5단계
+# 실제 ℃가 아니라 히터 강도 단계입니다.
+HEATER_STEPS = [
+    ("H1_LOW",  0x45, 8),
+    ("H2_MID1", 0x55, 8),
+    ("H3_MID2", 0x65, 8),
+    ("H4_HIGH", 0x73, 8),
+    ("H5_MAX",  0x85, 8),
+]
+
+
+# =========================================================
+# 한글 폰트
 # =========================================================
 FONT_PATHS = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
@@ -33,17 +70,6 @@ for path in FONT_PATHS:
 
 matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["toolbar"] = "None"
-
-
-# =========================================================
-# FILES
-# =========================================================
-DATA_DIR = "bme688_data"
-os.makedirs(DATA_DIR, exist_ok=True)
-
-BASELINE_CSV = os.path.join(DATA_DIR, "baseline_auto.csv")
-SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
-RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
 
 
 # =========================================================
@@ -225,6 +251,12 @@ def calc_gas_resistance(gas_adc, gas_range):
     return var3 / var2
 
 
+def set_heater(res_heat):
+    write_reg(REG_RES_HEAT_0, res_heat)
+    write_reg(REG_GAS_WAIT_0, 0x59)
+    write_reg(REG_CTRL_GAS_1, 0x20)
+
+
 def sensor_init():
     chip_id = read_reg(REG_CHIP_ID)
     print("Chip ID:", hex(chip_id))
@@ -240,9 +272,8 @@ def sensor_init():
     write_reg(REG_CONFIG, 0x08)
     write_reg(REG_CTRL_HUM, 0x01)
     write_reg(REG_CTRL_GAS_0, 0x00)
-    write_reg(REG_RES_HEAT_0, 0x73)
-    write_reg(REG_GAS_WAIT_0, 0x59)
-    write_reg(REG_CTRL_GAS_1, 0x20)
+
+    set_heater(HEATER_STEPS[0][1])
 
 
 def trigger_measurement():
@@ -270,7 +301,8 @@ def get_period(hour):
     return "야간"
 
 
-def read_sensor():
+def read_sensor(heater_name, heater_value):
+    set_heater(heater_value)
     trigger_measurement()
     time.sleep(0.8)
 
@@ -301,6 +333,8 @@ def read_sensor():
         "season": get_season(now.month),
         "period": get_period(now.hour),
         "hour": now.hour,
+        "heater": heater_name,
+        "heater_value": heater_value,
         "temp_c": temp_c,
         "hum_pct": hum_pct,
         "press_hpa": press_hpa,
@@ -313,7 +347,7 @@ def read_sensor():
 
 
 # =========================================================
-# DATA / CLASSIFIER
+# 데이터 / 판별
 # =========================================================
 def mean(values):
     return sum(values) / len(values) if values else 0.0
@@ -325,48 +359,6 @@ def stdev(values):
 
     m = mean(values)
     return math.sqrt(sum((x - m) ** 2 for x in values) / (len(values) - 1))
-
-
-def extract_features(rows, label, baseline_gas=None):
-    gas = [r["gas_ohm"] for r in rows if r["gas_ohm"] > 0]
-    temp = [r["temp_c"] for r in rows]
-    hum = [r["hum_pct"] for r in rows]
-    press = [r["press_hpa"] for r in rows]
-
-    if not gas:
-        return None
-
-    gas_start = mean(gas[:max(3, min(10, len(gas)))])
-    gas_end = mean(gas[-max(3, min(10, len(gas))):])
-    gas_min = min(gas)
-    gas_max = max(gas)
-    gas_avg = mean(gas)
-
-    ref = baseline_gas if baseline_gas and baseline_gas > 0 else gas_start
-    change_pct = ((gas_min - ref) / ref) * 100.0 if ref else 0.0
-
-    now = datetime.now()
-
-    return {
-        "id": now.strftime("%Y%m%d_%H%M%S"),
-        "timestamp": now.isoformat(timespec="seconds"),
-        "label": label,
-        "season": get_season(now.month),
-        "period": get_period(now.hour),
-        "hour": now.hour,
-        "count": len(rows),
-        "duration_sec": rows[-1]["epoch"] - rows[0]["epoch"] if len(rows) >= 2 else 0,
-        "gas_avg": gas_avg,
-        "gas_min": gas_min,
-        "gas_max": gas_max,
-        "gas_start": gas_start,
-        "gas_end": gas_end,
-        "gas_stdev": stdev(gas),
-        "gas_change_pct": change_pct,
-        "temp_avg": mean(temp),
-        "hum_avg": mean(hum),
-        "press_avg": mean(press),
-    }
 
 
 def save_dict_csv(path, row):
@@ -407,11 +399,105 @@ def count_labels():
 
     for r in rows:
         label = r.get("label", "")
-
         if label in counts:
             counts[label] += 1
 
     return counts
+
+
+def label_korean(label):
+    if label == "AIR":
+        return "정상공기"
+    if label == "ETHANOL":
+        return "에탄올"
+    if label == "IPA":
+        return "IPA"
+    if label == "UNKNOWN":
+        return "미지시료"
+    if label == "AUTO_AIR_BASELINE":
+        return "자동 AIR 기준"
+    if label == "REALTIME":
+        return "실시간"
+    return label
+
+
+def extract_features(rows, label, baseline_gas=None):
+    valid_rows = [r for r in rows if r.get("gas_ohm", 0) > 0]
+    gas = [r["gas_ohm"] for r in valid_rows]
+    temp = [r["temp_c"] for r in valid_rows]
+    hum = [r["hum_pct"] for r in valid_rows]
+    press = [r["press_hpa"] for r in valid_rows]
+
+    if len(gas) < 5:
+        return None
+
+    gas_start = mean(gas[:max(3, min(10, len(gas)))])
+    gas_end = mean(gas[-max(3, min(10, len(gas))):])
+    gas_min = min(gas)
+    gas_max = max(gas)
+    gas_avg = mean(gas)
+
+    ref = baseline_gas if baseline_gas and baseline_gas > 0 else gas_start
+    change_pct = ((gas_min - ref) / ref) * 100.0 if ref else 0.0
+
+    now = datetime.now()
+
+    feature = {
+        "id": now.strftime("%Y%m%d_%H%M%S"),
+        "timestamp": now.isoformat(timespec="seconds"),
+        "label": label,
+        "season": get_season(now.month),
+        "period": get_period(now.hour),
+        "hour": now.hour,
+        "count": len(valid_rows),
+        "duration_sec": valid_rows[-1]["epoch"] - valid_rows[0]["epoch"],
+        "gas_avg": gas_avg,
+        "gas_min": gas_min,
+        "gas_max": gas_max,
+        "gas_start": gas_start,
+        "gas_end": gas_end,
+        "gas_stdev": stdev(gas),
+        "gas_change_pct": change_pct,
+        "temp_avg": mean(temp),
+        "hum_avg": mean(hum),
+        "press_avg": mean(press),
+    }
+
+    # 히터별 특징
+    for heater_name, _, _ in HEATER_STEPS:
+        hrows = [r for r in valid_rows if r.get("heater") == heater_name]
+        hgas = [r["gas_ohm"] for r in hrows if r.get("gas_ohm", 0) > 0]
+
+        prefix = heater_name.lower()
+
+        if len(hgas) >= 3:
+            h_avg = mean(hgas)
+            h_min = min(hgas)
+            h_max = max(hgas)
+            h_start = mean(hgas[:min(5, len(hgas))])
+            h_end = mean(hgas[-min(5, len(hgas)):])
+            h_ref = baseline_gas if baseline_gas and baseline_gas > 0 else h_start
+            h_change = ((h_min - h_ref) / h_ref) * 100.0 if h_ref else 0.0
+
+            feature[f"{prefix}_avg"] = h_avg
+            feature[f"{prefix}_min"] = h_min
+            feature[f"{prefix}_max"] = h_max
+            feature[f"{prefix}_start"] = h_start
+            feature[f"{prefix}_end"] = h_end
+            feature[f"{prefix}_stdev"] = stdev(hgas)
+            feature[f"{prefix}_change_pct"] = h_change
+            feature[f"{prefix}_count"] = len(hgas)
+        else:
+            feature[f"{prefix}_avg"] = 0
+            feature[f"{prefix}_min"] = 0
+            feature[f"{prefix}_max"] = 0
+            feature[f"{prefix}_start"] = 0
+            feature[f"{prefix}_end"] = 0
+            feature[f"{prefix}_stdev"] = 0
+            feature[f"{prefix}_change_pct"] = 0
+            feature[f"{prefix}_count"] = len(hgas)
+
+    return feature
 
 
 def feature_distance(a, b):
@@ -420,16 +506,30 @@ def feature_distance(a, b):
         ("gas_min", 0.0008),
         ("gas_avg", 0.0006),
         ("gas_stdev", 0.001),
-        ("temp_avg", 0.6),
+        ("temp_avg", 0.5),
         ("hum_avg", 0.25),
         ("press_avg", 0.05),
     ]
+
+    for heater_name, _, _ in HEATER_STEPS:
+        p = heater_name.lower()
+        keys.extend([
+            (f"{p}_change_pct", 3.0),
+            (f"{p}_avg", 0.0008),
+            (f"{p}_min", 0.0010),
+            (f"{p}_stdev", 0.0012),
+        ])
 
     total = 0.0
 
     for key, scale in keys:
         av = float(a.get(key, 0) or 0)
         bv = float(b.get(key, 0) or 0)
+
+        # 히터 데이터가 없는 오래된 기록은 비교에서 약하게 반영
+        if av == 0 and bv == 0:
+            continue
+
         total += abs(av - bv) * scale
 
     return total
@@ -468,25 +568,13 @@ def classify(feature):
     return pct, winner
 
 
-def label_korean(label):
-    if label == "AIR":
-        return "정상공기"
-    if label == "ETHANOL":
-        return "에탄올"
-    if label == "IPA":
-        return "IPA"
-    if label == "UNKNOWN":
-        return "미지시료"
-    return label
-
-
 # =========================================================
 # APP
 # =========================================================
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("BME688 학습/판별 대시보드")
+        self.root.title("BME688 정밀 학습/판별 시스템")
         self.root.attributes("-fullscreen", True)
         self.fullscreen = True
 
@@ -495,8 +583,15 @@ class App:
         self.auto_baseline = True
         self.realtime_detect = False
 
-        self.current_rows = deque(maxlen=300)
-        self.detect_rows = deque(maxlen=45)
+        self.startup_warmup_active = True
+        self.startup_warmup_until = time.time() + STARTUP_WARMUP_SEC
+
+        self.cooldown_active = False
+        self.cooldown_until = 0
+        self.cooldown_reason = ""
+
+        self.current_rows = deque(maxlen=500)
+        self.detect_rows = deque(maxlen=180)
         self.baseline_buffer = []
 
         self.latest_air_gas = None
@@ -507,14 +602,13 @@ class App:
         self.sample_rows = []
         self.sample_phase = None
         self.phase_until = 0
+        self.expose_until = 0
+        self.train_duration = 0
+        self.current_heater_index = 0
+        self.heater_switch_at = 0
+        self.training_cycle_count = 0
 
         self.detect_history = deque(maxlen=3)
-
-        self.cooldown_active = False
-        self.cooldown_until = 0
-        self.cooldown_reason = ""
-        self.COOLDOWN_SEC = 600
-        self.RECOVERY_TOL = 0.15
 
         self.bg = "#101820"
         self.card = "#182632"
@@ -537,7 +631,7 @@ class App:
         self.update_ui()
 
     # -----------------------------------------------------
-    # UI BUILD
+    # UI
     # -----------------------------------------------------
     def build_ui(self):
         top = tk.Frame(self.root, bg=self.bg)
@@ -548,7 +642,7 @@ class App:
             text="상태: 준비중",
             bg=self.bg,
             fg=self.text,
-            font=("NanumGothic", 15, "bold"),
+            font=("NanumGothic", 14, "bold"),
         )
         self.status_label.pack(side="left", padx=8)
 
@@ -581,14 +675,14 @@ class App:
 
         self.cards = {}
 
-        for name in ["현재상태", "가스저항", "온도", "습도", "기압", "판별확률"]:
+        for name in ["현재상태", "가스저항", "히터단계", "온도", "습도", "판별확률"]:
             f = tk.Frame(info, bg=self.card, padx=14, pady=10)
             f.pack(side="left", fill="x", expand=True, padx=5, pady=5)
 
             title = tk.Label(f, text=name, bg=self.card, fg=self.muted, font=("NanumGothic", 11))
             title.pack(anchor="w")
 
-            value = tk.Label(f, text="-", bg=self.card, fg=self.text, font=("NanumGothic", 18, "bold"))
+            value = tk.Label(f, text="-", bg=self.card, fg=self.text, font=("NanumGothic", 17, "bold"))
             value.pack(anchor="w")
 
             self.cards[name] = value
@@ -620,7 +714,7 @@ class App:
             fg="white",
             font=("NanumGothic", 34, "bold"),
             padx=40,
-            pady=16,
+            pady=14,
         )
         self.notice_title.pack(fill="x")
 
@@ -629,9 +723,9 @@ class App:
             text="",
             bg=self.notice_blue,
             fg="white",
-            font=("NanumGothic", 24, "bold"),
+            font=("NanumGothic", 23, "bold"),
             padx=40,
-            pady=12,
+            pady=10,
             justify="center",
         )
         self.notice_message.pack(fill="x")
@@ -641,9 +735,9 @@ class App:
             text="",
             bg=self.notice_blue,
             fg="white",
-            font=("NanumGothic", 40, "bold"),
+            font=("NanumGothic", 36, "bold"),
             padx=40,
-            pady=16,
+            pady=12,
         )
         self.notice_timer.pack(fill="x")
 
@@ -672,7 +766,10 @@ class App:
         if remain is None:
             self.notice_timer.configure(text="", bg=color)
         else:
-            self.notice_timer.configure(text=f"남은 시간: {remain}초", bg=color)
+            if remain >= 60:
+                self.notice_timer.configure(text=f"남은 시간: {remain // 60:02d}:{remain % 60:02d}", bg=color)
+            else:
+                self.notice_timer.configure(text=f"남은 시간: {remain}초", bg=color)
 
         self.notice_frame.place(relx=0.5, rely=0.48, anchor="center")
 
@@ -680,46 +777,56 @@ class App:
         self.notice_frame.place_forget()
 
     # -----------------------------------------------------
-    # POPUP MENUS
+    # 메뉴
     # -----------------------------------------------------
     def open_learn_menu(self):
-        if self.is_blocked_by_cooldown(show_message=True):
+        if self.is_blocked():
             return
 
         win = tk.Toplevel(self.root)
         win.title("학습 선택")
-        win.geometry("360x260")
+        win.geometry("460x520")
         win.configure(bg=self.bg)
 
         tk.Label(
             win,
-            text="학습할 대상을 선택하세요",
+            text="학습 대상과 시간을 선택하세요",
             bg=self.bg,
             fg=self.text,
             font=("NanumGothic", 16, "bold"),
-        ).pack(pady=18)
+        ).pack(pady=15)
 
-        items = [
-            ("정상공기 학습", "AIR"),
-            ("에탄올 학습", "ETHANOL"),
-            ("IPA 학습", "IPA"),
-        ]
-
-        for title, label in items:
-            tk.Button(
+        for label_title, label in [
+            ("정상공기", "AIR"),
+            ("에탄올", "ETHANOL"),
+            ("IPA", "IPA"),
+        ]:
+            box = tk.LabelFrame(
                 win,
-                text=title,
-                command=lambda l=label, w=win: (w.destroy(), self.start_sample(l)),
-                font=("NanumGothic", 13, "bold"),
-                bg="#263847",
+                text=label_title,
+                bg=self.bg,
                 fg=self.text,
-                relief="flat",
-                padx=20,
-                pady=10,
-            ).pack(fill="x", padx=28, pady=6)
+                font=("NanumGothic", 12, "bold"),
+                padx=8,
+                pady=8,
+            )
+            box.pack(fill="x", padx=18, pady=6)
+
+            for duration_title, duration_sec in TRAIN_DURATIONS:
+                tk.Button(
+                    box,
+                    text=duration_title,
+                    command=lambda l=label, d=duration_sec, w=win: (w.destroy(), self.start_training(l, d)),
+                    font=("NanumGothic", 11, "bold"),
+                    bg="#263847",
+                    fg=self.text,
+                    relief="flat",
+                    padx=14,
+                    pady=6,
+                ).pack(side="left", padx=4, pady=4)
 
     def open_detect_menu(self):
-        if self.is_blocked_by_cooldown(show_message=True):
+        if self.is_blocked():
             return
 
         win = tk.Toplevel(self.root)
@@ -751,8 +858,8 @@ class App:
 
         tk.Button(
             win,
-            text="미지시료 수동 판별",
-            command=lambda w=win: (w.destroy(), self.start_unknown()),
+            text="미지시료 수동 판별 5분",
+            command=lambda w=win: (w.destroy(), self.start_unknown(300)),
             font=("NanumGothic", 13, "bold"),
             bg="#263847",
             fg=self.text,
@@ -762,26 +869,31 @@ class App:
         ).pack(fill="x", padx=28, pady=8)
 
     # -----------------------------------------------------
-    # STATUS / MODE
+    # 상태 / 모드
     # -----------------------------------------------------
     def update_status(self, text=None):
         counts = count_labels()
 
         detect_state = "실시간판별 ON" if self.realtime_detect else "실시간판별 OFF"
         base_state = "AIR기준기록 ON" if self.auto_baseline else "AIR기준기록 OFF"
-        buffer_state = f"버퍼 {len(self.baseline_buffer)}/60"
+        buffer_state = f"버퍼 {len(self.baseline_buffer)}/180"
         save_state = f"AIR기준 {self.baseline_save_count}회"
         learn_state = f"AIR {counts['AIR']} / ETH {counts['ETHANOL']} / IPA {counts['IPA']}"
 
-        cooldown_text = ""
+        extra = ""
+
+        if self.startup_warmup_active:
+            remain = max(0, int(self.startup_warmup_until - time.time()))
+            extra += f" | 초기안정화 {remain // 60:02d}:{remain % 60:02d}"
+
         if self.cooldown_active:
             remain = max(0, int(self.cooldown_until - time.time()))
-            cooldown_text = f" | 쿨타임 {remain // 60:02d}:{remain % 60:02d}"
+            extra += f" | 쿨타임 {remain // 60:02d}:{remain % 60:02d}"
 
         if text:
-            msg = f"상태: {text}{cooldown_text} | {detect_state} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
+            msg = f"상태: {text}{extra} | {detect_state} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
         else:
-            msg = f"상태: {detect_state}{cooldown_text} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
+            msg = f"상태: {detect_state}{extra} | {base_state} | {buffer_state} | {save_state} | {learn_state}"
 
         self.status_label.config(text=msg)
 
@@ -790,6 +902,12 @@ class App:
         self.root.attributes("-fullscreen", self.fullscreen)
 
     def toggle_auto(self):
+        if self.startup_warmup_active:
+            messagebox.showinfo("초기 안정화 중", "초기 안정화 중에는 AIR 기준 기록을 시작할 수 없습니다.")
+            self.auto_baseline = False
+            self.update_status()
+            return
+
         if self.cooldown_active:
             messagebox.showinfo("쿨타임 중", "시료 잔류 제거 쿨타임 중에는 AIR 기준 기록을 켤 수 없습니다.")
             self.auto_baseline = False
@@ -797,10 +915,7 @@ class App:
             return
 
         if self.realtime_detect:
-            messagebox.showinfo(
-                "안내",
-                "실시간 판별 중에는 AIR 기준 기록을 켤 수 없습니다.\n먼저 실시간 판별을 끄세요."
-            )
+            messagebox.showinfo("안내", "실시간 판별 중에는 AIR 기준 기록을 켤 수 없습니다.")
             self.auto_baseline = False
         else:
             self.auto_baseline = not self.auto_baseline
@@ -808,7 +923,7 @@ class App:
         self.update_status()
 
     def toggle_realtime(self):
-        if self.is_blocked_by_cooldown(show_message=True):
+        if self.is_blocked():
             return
 
         self.realtime_detect = not self.realtime_detect
@@ -825,12 +940,95 @@ class App:
             self.cards["판별확률"].config(text="-")
             self.update_status("실시간 판별 OFF")
 
+    def is_blocked(self):
+        if self.startup_warmup_active:
+            remain = max(0, int(self.startup_warmup_until - time.time()))
+            messagebox.showinfo(
+                "초기 안정화 중",
+                f"센서 초기 안정화 중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초\n\n"
+                "정확도 우선 모드라서 안정화 전에는 학습/판별을 막습니다."
+            )
+            return True
+
+        if self.cooldown_active:
+            remain = max(0, int(self.cooldown_until - time.time()))
+
+            if remain > 0:
+                messagebox.showinfo(
+                    "쿨타임 중",
+                    f"시료 잔류 제거 대기중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초"
+                )
+                return True
+
+            if not self.is_air_recovered():
+                messagebox.showinfo(
+                    "회복 대기",
+                    "쿨타임은 끝났지만 아직 AIR 기준 범위로 회복되지 않았습니다.\n환기 후 다시 시도하세요."
+                )
+                return True
+
+            self.cooldown_active = False
+            self.auto_baseline = True
+
+        return False
+
     # -----------------------------------------------------
-    # COOLDOWN
+    # 히터 단계
     # -----------------------------------------------------
+    def update_heater_step(self):
+        now = time.time()
+
+        name, value, dur = HEATER_STEPS[self.current_heater_index]
+
+        if now >= self.heater_switch_at:
+            self.current_heater_index = (self.current_heater_index + 1) % len(HEATER_STEPS)
+
+            if self.current_heater_index == 0:
+                self.training_cycle_count += 1
+
+            name, value, dur = HEATER_STEPS[self.current_heater_index]
+            self.heater_switch_at = now + dur
+
+        return name, value
+
+    # -----------------------------------------------------
+    # 초기 안정화 / 쿨타임
+    # -----------------------------------------------------
+    def check_startup_warmup(self):
+        if not self.startup_warmup_active:
+            return
+
+        remain = int(self.startup_warmup_until - time.time())
+
+        if remain > 0:
+            self.auto_baseline = False
+            self.show_notice(
+                "초기 안정화 중",
+                "센서 예열 및 주변 공기 안정화 대기",
+                remain=remain,
+                color=self.notice_blue,
+                sub="이 시간 동안 학습 / 판별 / 자동 AIR 기준 저장은 차단됩니다.",
+            )
+            self.update_status("초기 안정화 대기중")
+            return
+
+        self.startup_warmup_active = False
+        self.auto_baseline = True
+        self.baseline_buffer = []
+
+        self.show_notice(
+            "초기 안정화 완료",
+            "자동 AIR 기준 기록을 시작합니다",
+            remain=None,
+            color=self.notice_green,
+            sub="정상공기 상태에서 기준 데이터가 쌓입니다.",
+        )
+        self.root.after(3000, self.hide_notice)
+        self.update_status("초기 안정화 완료 / AIR 기준 기록 시작")
+
     def start_cooldown(self, reason):
         self.cooldown_active = True
-        self.cooldown_until = time.time() + self.COOLDOWN_SEC
+        self.cooldown_until = time.time() + COOLDOWN_SEC
         self.cooldown_reason = reason
 
         self.auto_baseline = False
@@ -844,12 +1042,12 @@ class App:
         self.show_notice(
             "시료 잔류 제거 대기",
             "시료를 치우고 충분히 환기하세요",
-            remain=self.COOLDOWN_SEC,
+            remain=COOLDOWN_SEC,
             color=self.notice_yellow,
             sub="쿨타임 중에는 학습 / 판별 / 자동 AIR 기준 기록이 잠깁니다.",
         )
 
-        self.update_status(f"{reason} 후 쿨타임 시작 / 학습·판별·AIR기준 기록 잠금")
+        self.update_status(f"{reason} 후 쿨타임 시작")
 
     def is_air_recovered(self):
         if not self.latest_air_gas:
@@ -863,16 +1061,16 @@ class App:
         if not self.latest_air_gas:
             return False
 
-        rows = list(self.current_rows)[-40:]
+        rows = list(self.current_rows)[-80:]
         gas = [r["gas_ohm"] for r in rows if r["gas_ohm"] > 0]
 
-        if len(gas) < 20:
+        if len(gas) < 30:
             return False
 
         avg_gas = mean(gas)
         diff_ratio = abs(avg_gas - self.latest_air_gas) / self.latest_air_gas
 
-        return diff_ratio <= self.RECOVERY_TOL
+        return diff_ratio <= RECOVERY_TOL
 
     def check_cooldown_release(self):
         if not self.cooldown_active:
@@ -910,7 +1108,6 @@ class App:
             self.root.after(3000, self.hide_notice)
         else:
             self.auto_baseline = False
-
             self.show_notice(
                 "쿨타임 종료 / 아직 미회복",
                 "AIR 기준 범위로 돌아오지 않았습니다\n계속 환기하세요",
@@ -918,45 +1115,14 @@ class App:
                 color=self.notice_orange,
                 sub="회복 전까지 학습 / 판별 / 자동 AIR 기준 기록이 차단됩니다.",
             )
-
             self.cards["현재상태"].config(text="쿨타임 종료 / 아직 미회복", fg="#FFD166")
             self.update_status("쿨타임 종료 / AIR 기준 범위 미회복")
 
-    def is_blocked_by_cooldown(self, show_message=False):
-        if not self.cooldown_active:
-            return False
-
-        remain = max(0, int(self.cooldown_until - time.time()))
-
-        if remain > 0:
-            if show_message:
-                messagebox.showinfo(
-                    "쿨타임 중",
-                    f"시료 잔류 제거 대기중입니다.\n"
-                    f"남은 시간: {remain // 60}분 {remain % 60}초\n\n"
-                    f"이 시간 동안 학습/판별/자동 AIR 기록이 차단됩니다."
-                )
-            return True
-
-        if not self.is_air_recovered():
-            if show_message:
-                messagebox.showinfo(
-                    "회복 대기",
-                    "쿨타임은 끝났지만 아직 AIR 기준 범위로 회복되지 않았습니다.\n"
-                    "환기 후 다시 시도하세요."
-                )
-            return True
-
-        self.cooldown_active = False
-        self.auto_baseline = True
-        self.update_status("회복 완료 / 자동 AIR 기준 기록 재개")
-        return False
-
     # -----------------------------------------------------
-    # SAMPLING
+    # 학습 / 판별
     # -----------------------------------------------------
-    def start_sample(self, label):
-        if self.is_blocked_by_cooldown(show_message=True):
+    def start_training(self, label, duration_sec):
+        if self.is_blocked():
             return
 
         self.realtime_detect = False
@@ -967,20 +1133,31 @@ class App:
         self.pending_label = label
         self.sample_rows = []
         self.sample_phase = "READY"
-        self.phase_until = time.time() + 5
+        self.phase_until = time.time() + READY_SEC
+        self.expose_until = 0
+        self.train_duration = duration_sec
+
+        self.current_heater_index = 0
+        self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
+        self.training_cycle_count = 0
+
+        if label == "AIR":
+            msg = "정상공기 상태를 그대로 유지하세요"
+        else:
+            msg = "아직 시료를 넣지 마세요"
 
         self.show_notice(
-            f"{label_korean(label)} 학습 준비",
-            "아직 시료를 넣지 마세요",
-            remain=5,
+            f"{label_korean(label)} 정밀학습 준비",
+            msg,
+            remain=READY_SEC,
             color=self.notice_blue,
-            sub="준비가 끝나면 노출 안내가 표시됩니다.",
+            sub="준비가 끝나면 정밀학습이 시작됩니다.",
         )
 
-        self.update_status(f"{label} 학습 준비 5초 / AIR 기준 기록 일시정지")
+        self.update_status(f"{label} 정밀학습 준비")
 
-    def start_unknown(self):
-        if self.is_blocked_by_cooldown(show_message=True):
+    def start_unknown(self, duration_sec):
+        if self.is_blocked():
             return
 
         self.realtime_detect = False
@@ -991,17 +1168,23 @@ class App:
         self.pending_label = "UNKNOWN"
         self.sample_rows = []
         self.sample_phase = "READY"
-        self.phase_until = time.time() + 5
+        self.phase_until = time.time() + READY_SEC
+        self.expose_until = 0
+        self.train_duration = duration_sec
+
+        self.current_heater_index = 0
+        self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
+        self.training_cycle_count = 0
 
         self.show_notice(
             "미지시료 판별 준비",
             "아직 시료를 넣지 마세요",
-            remain=5,
+            remain=READY_SEC,
             color=self.notice_blue,
-            sub="준비가 끝나면 노출 안내가 표시됩니다.",
+            sub="준비가 끝나면 시료를 일정하게 노출하세요.",
         )
 
-        self.update_status("미지시료 수동 판별 준비 5초 / AIR 기준 기록 일시정지")
+        self.update_status("미지시료 판별 준비")
 
     def finish_sample(self):
         feature = extract_features(self.sample_rows, self.pending_label, self.latest_air_gas)
@@ -1020,23 +1203,25 @@ class App:
             return
 
         finished_label = self.pending_label
+        finished_mode = self.sample_mode
 
-        if self.sample_mode == "LEARN":
+        if finished_mode == "LEARN":
             save_dict_csv(SAMPLES_CSV, feature)
             self.cards["현재상태"].config(text=f"{label_korean(finished_label)} 학습완료", fg="#4DFF88")
 
+            sub = "시료를 제거하고 회복 기록으로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료"
             self.show_notice(
                 f"{label_korean(finished_label)} 학습 완료",
-                "학습 데이터가 저장되었습니다",
+                "히터 5단계 정밀학습 데이터가 저장되었습니다",
                 remain=None,
                 color=self.notice_green,
-                sub="시료 잔류 제거 쿨타임으로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료",
+                sub=sub,
             )
-
             self.update_status(f"{finished_label} 학습 저장 완료")
+
         else:
             pct, winner = classify(feature)
-            self.cards["현재상태"].config(text=f"{winner}", fg="#FFD166")
+            self.cards["현재상태"].config(text=f"{label_korean(winner)}", fg="#FFD166")
             self.cards["판별확률"].config(
                 text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
             )
@@ -1048,7 +1233,6 @@ class App:
                 color=self.notice_green,
                 sub=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%",
             )
-
             self.update_status("수동 판별 완료")
 
         self.sample_mode = None
@@ -1060,20 +1244,16 @@ class App:
             self.root.after(1500, lambda: self.start_cooldown(finished_label))
         elif finished_label == "AIR":
             self.auto_baseline = True
-            self.update_status("AIR 학습 완료 / 자동 AIR 기준 기록 재개")
             self.root.after(3000, self.hide_notice)
 
     # -----------------------------------------------------
-    # REALTIME CLASSIFY
+    # 실시간 판별
     # -----------------------------------------------------
     def run_realtime_detect(self):
-        if not self.realtime_detect:
+        if not self.realtime_detect or self.sample_mode is not None:
             return
 
-        if self.sample_mode is not None:
-            return
-
-        if len(self.detect_rows) < 25:
+        if len(self.detect_rows) < 80:
             self.cards["현재상태"].config(text="데이터 수집중", fg=self.text)
             self.cards["판별확률"].config(text="-")
             return
@@ -1094,7 +1274,7 @@ class App:
         self.detect_history.append(winner)
 
         stable = len(self.detect_history) == 3 and len(set(self.detect_history)) == 1
-        confident = best_pct >= 60.0
+        confident = best_pct >= CONFIDENCE_LIMIT
 
         if stable and confident:
             if winner == "AIR":
@@ -1110,7 +1290,7 @@ class App:
                 state = winner
                 color = self.text
         else:
-            state = f"{winner} 의심"
+            state = f"{label_korean(winner)} 의심"
             color = "#00E5FF"
 
         self.cards["현재상태"].config(text=f"{state} {best_pct:.1f}%", fg=color)
@@ -1119,12 +1299,12 @@ class App:
         )
 
     # -----------------------------------------------------
-    # DATA MANAGER
+    # 데이터 관리
     # -----------------------------------------------------
     def show_data_manager(self):
         win = tk.Toplevel(self.root)
         win.title("데이터 관리")
-        win.geometry("1320x780")
+        win.geometry("1380x800")
         win.configure(bg=self.bg)
 
         title = tk.Label(
@@ -1168,9 +1348,11 @@ class App:
 
     def build_table_tab(self, parent, csv_path, title):
         columns = (
-            "id", "timestamp", "label", "season", "period",
+            "id", "timestamp", "label", "duration_sec", "count",
             "gas_change_pct", "gas_avg", "gas_min", "gas_max",
-            "temp_avg", "hum_avg", "press_avg", "count"
+            "h1_low_change_pct", "h2_mid1_change_pct", "h3_mid2_change_pct",
+            "h4_high_change_pct", "h5_max_change_pct",
+            "temp_avg", "hum_avg", "press_avg"
         )
 
         frame = tk.Frame(parent, bg=self.bg)
@@ -1187,47 +1369,41 @@ class App:
             "id": "ID",
             "timestamp": "시간",
             "label": "종류",
-            "season": "계절",
-            "period": "시간대",
-            "gas_change_pct": "변화율%",
+            "duration_sec": "시간초",
+            "count": "개수",
+            "gas_change_pct": "전체변화%",
             "gas_avg": "평균Ω",
             "gas_min": "최저Ω",
             "gas_max": "최고Ω",
+            "h1_low_change_pct": "H1%",
+            "h2_mid1_change_pct": "H2%",
+            "h3_mid2_change_pct": "H3%",
+            "h4_high_change_pct": "H4%",
+            "h5_max_change_pct": "H5%",
             "temp_avg": "온도",
             "hum_avg": "습도",
             "press_avg": "기압",
-            "count": "개수",
-        }
-
-        widths = {
-            "id": 120,
-            "timestamp": 150,
-            "label": 115,
-            "season": 55,
-            "period": 60,
-            "gas_change_pct": 80,
-            "gas_avg": 90,
-            "gas_min": 90,
-            "gas_max": 90,
-            "temp_avg": 70,
-            "hum_avg": 70,
-            "press_avg": 85,
-            "count": 55,
         }
 
         for c in columns:
             tree.heading(c, text=headings[c])
-            tree.column(c, width=widths[c], anchor="center")
+            tree.column(c, width=82, anchor="center")
 
         detail = tk.Text(
             parent,
-            height=8,
+            height=9,
             bg="#0B1218",
             fg=self.text,
             insertbackground=self.text,
-            font=("NanumGothic", 11),
+            font=("NanumGothic", 10),
         )
         detail.pack(fill="x", padx=8, pady=8)
+
+        def safe_float(v):
+            try:
+                return float(v)
+            except Exception:
+                return 0.0
 
         def load_table():
             for item in tree.get_children():
@@ -1236,21 +1412,20 @@ class App:
             rows = load_csv(csv_path)
 
             for idx, r in enumerate(rows):
-                values = (
-                    r.get("id", idx),
-                    r.get("timestamp", ""),
-                    r.get("label", ""),
-                    r.get("season", ""),
-                    r.get("period", ""),
-                    f"{float(r.get('gas_change_pct', 0)):.1f}",
-                    f"{float(r.get('gas_avg', 0)):,.0f}",
-                    f"{float(r.get('gas_min', 0)):,.0f}",
-                    f"{float(r.get('gas_max', 0)):,.0f}",
-                    f"{float(r.get('temp_avg', 0)):.1f}",
-                    f"{float(r.get('hum_avg', 0)):.1f}",
-                    f"{float(r.get('press_avg', 0)):.1f}",
-                    r.get("count", ""),
-                )
+                values = []
+                for c in columns:
+                    if c in [
+                        "gas_change_pct", "h1_low_change_pct", "h2_mid1_change_pct",
+                        "h3_mid2_change_pct", "h4_high_change_pct", "h5_max_change_pct",
+                        "temp_avg", "hum_avg", "press_avg"
+                    ]:
+                        values.append(f"{safe_float(r.get(c, 0)):.1f}")
+                    elif c in ["gas_avg", "gas_min", "gas_max"]:
+                        values.append(f"{safe_float(r.get(c, 0)):,.0f}")
+                    elif c == "duration_sec":
+                        values.append(f"{safe_float(r.get(c, 0)):.0f}")
+                    else:
+                        values.append(r.get(c, ""))
                 tree.insert("", "end", iid=str(idx), values=values)
 
         def show_detail(_event=None):
@@ -1334,25 +1509,32 @@ class App:
         self.update_status("데이터 변경 완료")
 
     # -----------------------------------------------------
-    # LOOP
+    # 메인 루프
     # -----------------------------------------------------
     def loop(self):
         sensor_init()
         self.update_status("센서 시작 완료")
 
+        self.current_heater_index = 0
+        self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
+
         while self.running:
             try:
-                row = read_sensor()
+                self.check_startup_warmup()
+                self.check_cooldown_release()
+
+                heater_name, heater_value = self.update_heater_step()
+                row = read_sensor(heater_name, heater_value)
 
                 self.current_rows.append(row)
                 self.detect_rows.append(row)
-
                 save_dict_csv(RAW_CSV, row)
 
-                self.check_cooldown_release()
+                self.cards["히터단계"].config(text=heater_name)
 
                 can_record_air_baseline = (
                     self.auto_baseline
+                    and not self.startup_warmup_active
                     and not self.cooldown_active
                     and not self.realtime_detect
                     and self.sample_mode is None
@@ -1363,7 +1545,7 @@ class App:
                 if can_record_air_baseline:
                     self.baseline_buffer.append(row)
 
-                    if len(self.baseline_buffer) >= 60:
+                    if len(self.baseline_buffer) >= 180:
                         feature = extract_features(self.baseline_buffer, "AUTO_AIR_BASELINE")
 
                         if feature:
@@ -1381,53 +1563,75 @@ class App:
 
                         if remain <= 0:
                             self.sample_phase = "EXPOSE"
-                            self.phase_until = now + 20
+                            self.expose_until = now + self.train_duration
+
+                            if self.pending_label == "AIR":
+                                message = "정상공기 상태를 그대로 유지하세요"
+                                sub = "히터 5단계가 반복되며 정상공기 패턴을 기록합니다."
+                            elif self.pending_label == "UNKNOWN":
+                                message = "미지시료를 센서 근처에\n일정하게 유지하세요"
+                                sub = "히터 5단계가 반복되며 판별용 데이터를 기록합니다."
+                            else:
+                                message = f"{label_korean(self.pending_label)}을\n센서 근처에 일정하게 유지하세요"
+                                sub = "중간에 뺐다 넣지 말고 일정한 위치와 농도를 유지하세요."
 
                             self.show_notice(
-                                f"{label_korean(self.pending_label)} 노출 중",
-                                f"지금 {label_korean(self.pending_label)}를\n센서 가까이 가져가세요",
-                                remain=20,
+                                f"{label_korean(self.pending_label)} 정밀기록 중",
+                                message,
+                                remain=int(self.train_duration),
                                 color=self.notice_orange,
-                                sub="이 구간의 데이터가 노출 반응으로 저장됩니다.",
+                                sub=sub,
                             )
 
-                            self.update_status(f"{self.pending_label} 노출 기록 20초")
+                            self.update_status(f"{self.pending_label} 정밀기록 시작")
                         else:
+                            msg = "정상공기 상태 유지" if self.pending_label == "AIR" else "아직 시료를 넣지 마세요"
                             self.show_notice(
                                 f"{label_korean(self.pending_label)} 준비",
-                                "아직 시료를 넣지 마세요",
+                                msg,
                                 remain=remain,
                                 color=self.notice_blue,
-                                sub="준비가 끝나면 시료 노출 안내가 표시됩니다.",
+                                sub="준비 시간이 끝나면 정밀기록이 시작됩니다.",
                             )
                             self.update_status(f"{self.pending_label} 준비 {remain}초")
 
                     elif self.sample_phase == "EXPOSE":
                         self.sample_rows.append(row)
-                        remain = max(0, int(self.phase_until - now))
+                        remain = max(0, int(self.expose_until - now))
 
                         if remain <= 0:
-                            self.sample_phase = "RECOVER"
-                            self.phase_until = now + 40
+                            if self.pending_label in ["ETHANOL", "IPA", "UNKNOWN"]:
+                                self.sample_phase = "RECOVER"
+                                self.phase_until = now + RECOVER_SEC
 
-                            self.show_notice(
-                                "회복 기록 중",
-                                "시료를 제거하고\n충분히 환기하세요",
-                                remain=40,
-                                color=self.notice_green,
-                                sub="이 구간의 데이터는 정상 공기로 돌아오는 패턴으로 저장됩니다.",
-                            )
+                                self.show_notice(
+                                    "회복 기록 중",
+                                    "시료를 제거하고\n충분히 환기하세요",
+                                    remain=RECOVER_SEC,
+                                    color=self.notice_green,
+                                    sub="회복 구간에는 시료를 계속 넣으면 안 됩니다.",
+                                )
 
-                            self.update_status(f"{self.pending_label} 회복 기록 40초")
+                                self.update_status(f"{self.pending_label} 회복 기록 시작")
+                            else:
+                                self.finish_sample()
                         else:
+                            if self.pending_label == "AIR":
+                                message = "정상공기 상태를 그대로 유지하세요"
+                            elif self.pending_label == "UNKNOWN":
+                                message = "미지시료를 센서 근처에\n일정하게 유지하세요"
+                            else:
+                                message = f"{label_korean(self.pending_label)}을\n센서 근처에 일정하게 유지하세요"
+
+                            cycle_text = f"히터: {heater_name} / 사이클: {self.training_cycle_count}"
                             self.show_notice(
-                                f"{label_korean(self.pending_label)} 노출 중",
-                                f"지금 {label_korean(self.pending_label)}를\n센서 가까이 가져가세요",
+                                f"{label_korean(self.pending_label)} 정밀기록 중",
+                                message,
                                 remain=remain,
                                 color=self.notice_orange,
-                                sub="20초가 끝나면 바로 시료를 치우세요.",
+                                sub=cycle_text,
                             )
-                            self.update_status(f"{self.pending_label} 노출중 {remain}초")
+                            self.update_status(f"{self.pending_label} 기록중 {remain // 60:02d}:{remain % 60:02d}")
 
                     elif self.sample_phase == "RECOVER":
                         self.sample_rows.append(row)
@@ -1443,10 +1647,10 @@ class App:
                                 color=self.notice_green,
                                 sub="회복 시간에는 시료를 계속 넣으면 안 됩니다.",
                             )
-                            self.update_status(f"{self.pending_label} 회복중 {remain}초")
+                            self.update_status(f"{self.pending_label} 회복중 {remain // 60:02d}:{remain % 60:02d}")
 
                 else:
-                    if self.realtime_detect and not self.cooldown_active:
+                    if self.realtime_detect and not self.cooldown_active and not self.startup_warmup_active:
                         self.run_realtime_detect()
 
                     self.update_status()
@@ -1464,7 +1668,7 @@ class App:
             time.sleep(0.4)
 
     # -----------------------------------------------------
-    # DRAW
+    # 그래프
     # -----------------------------------------------------
     def style_axis(self, ax):
         ax.set_facecolor(self.card)
@@ -1486,7 +1690,6 @@ class App:
             self.cards["가스저항"].config(text=f"{latest['gas_ohm']:,.0f} Ω")
             self.cards["온도"].config(text=f"{latest['temp_c']:.2f} ℃")
             self.cards["습도"].config(text=f"{latest['hum_pct']:.1f} %")
-            self.cards["기압"].config(text=f"{latest['press_hpa']:.2f} hPa")
 
             t0 = rows[0]["epoch"]
             xs = [r["epoch"] - t0 for r in rows]
@@ -1513,7 +1716,7 @@ class App:
             self.ax_env.legend(facecolor=self.card, edgecolor="#314452", labelcolor=self.text)
 
             self.fig.suptitle(
-                "BME688 에탄올 / IPA 학습 판별 시스템",
+                "BME688 히터 5단계 정밀 학습 / 에탄올 / IPA 판별 시스템",
                 color=self.text,
                 fontsize=16,
                 fontweight="bold",
@@ -1526,7 +1729,7 @@ class App:
             self.root.after(1000, self.update_ui)
 
     # -----------------------------------------------------
-    # CLOSE
+    # 종료
     # -----------------------------------------------------
     def close(self):
         self.running = False
