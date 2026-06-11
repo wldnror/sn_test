@@ -27,15 +27,19 @@ BASELINE_CSV = os.path.join(DATA_DIR, "baseline_auto.csv")
 SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
 
-STARTUP_WARMUP_SEC = 600        # 프로그램 시작 안정화 10분
-COOLDOWN_SEC = 600              # 시료 학습/판별 후 기본 쿨타임 10분
-RECOVERY_TOL = 0.15             # AIR 기준 대비 ±15% 회복 판단
-CONFIDENCE_LIMIT = 70.0         # 실시간 판별 확정 기준
+STARTUP_WARMUP_SEC = 600
+COOLDOWN_SEC = 600
+RECOVERY_TOL = 0.15
+CONFIDENCE_LIMIT = 70.0
 
-READY_SEC = 30                  # 정밀학습 전 준비 시간
-RECOVER_SEC = 300               # 정밀학습 후 회복 기록 5분
+READY_SEC = 30
+RECOVER_SEC = 300
 
-# 정밀학습 시간 선택용
+# 자동 AIR 기준을 판별용 AIR 학습 데이터로도 넣는 주기
+# 1 = 자동 AIR 기준 저장될 때마다 samples.csv에도 AIR로 저장
+# 2 = 자동 AIR 기준 2번 저장마다 1번만 AIR 학습으로 반영
+AUTO_AIR_TO_SAMPLES_EVERY = 1
+
 TRAIN_DURATIONS = [
     ("빠른 테스트 2분", 120),
     ("정밀학습 10분", 600),
@@ -43,8 +47,6 @@ TRAIN_DURATIONS = [
     ("정밀학습 30분", 1800),
 ]
 
-# 빠른 실험용 히터 5단계
-# 실제 ℃가 아니라 히터 강도 단계입니다.
 HEATER_STEPS = [
     ("H1_LOW",  0x45, 8),
     ("H2_MID1", 0x55, 8),
@@ -463,7 +465,6 @@ def extract_features(rows, label, baseline_gas=None):
         "press_avg": mean(press),
     }
 
-    # 히터별 특징
     for heater_name, _, _ in HEATER_STEPS:
         hrows = [r for r in valid_rows if r.get("heater") == heater_name]
         hgas = [r["gas_ohm"] for r in hrows if r.get("gas_ohm", 0) > 0]
@@ -526,7 +527,6 @@ def feature_distance(a, b):
         av = float(a.get(key, 0) or 0)
         bv = float(b.get(key, 0) or 0)
 
-        # 히터 데이터가 없는 오래된 기록은 비교에서 약하게 반영
         if av == 0 and bv == 0:
             continue
 
@@ -596,6 +596,7 @@ class App:
 
         self.latest_air_gas = None
         self.baseline_save_count = len(load_csv(BASELINE_CSV))
+        self.auto_air_to_samples_count = 0
 
         self.sample_mode = None
         self.pending_label = None
@@ -1021,7 +1022,7 @@ class App:
             "자동 AIR 기준 기록을 시작합니다",
             remain=None,
             color=self.notice_green,
-            sub="정상공기 상태에서 기준 데이터가 쌓입니다.",
+            sub="정상공기 상태에서 기준 데이터가 쌓이고, 판별용 AIR 학습에도 반영됩니다.",
         )
         self.root.after(3000, self.hide_notice)
         self.update_status("초기 안정화 완료 / AIR 기준 기록 시작")
@@ -1331,11 +1332,11 @@ class App:
         tab_samples = tk.Frame(notebook, bg=self.bg)
         tab_baseline = tk.Frame(notebook, bg=self.bg)
 
-        notebook.add(tab_samples, text="학습 데이터")
-        notebook.add(tab_baseline, text="자동 AIR 기준")
+        notebook.add(tab_samples, text="판별용 학습 데이터")
+        notebook.add(tab_baseline, text="자동 AIR 기준 원본")
 
-        self.build_table_tab(tab_samples, SAMPLES_CSV, "학습 데이터")
-        self.build_table_tab(tab_baseline, BASELINE_CSV, "자동 AIR 기준")
+        self.build_table_tab(tab_samples, SAMPLES_CSV, "판별용 학습 데이터")
+        self.build_table_tab(tab_baseline, BASELINE_CSV, "자동 AIR 기준 원본")
 
         tk.Button(
             win,
@@ -1552,6 +1553,16 @@ class App:
                             save_dict_csv(BASELINE_CSV, feature)
                             self.latest_air_gas = feature["gas_avg"]
                             self.baseline_save_count += 1
+
+                            self.auto_air_to_samples_count += 1
+
+                            if self.auto_air_to_samples_count >= AUTO_AIR_TO_SAMPLES_EVERY:
+                                air_feature = dict(feature)
+                                air_feature["id"] = datetime.now().strftime("%Y%m%d_%H%M%S") + "_AUTOAIR"
+                                air_feature["timestamp"] = datetime.now().isoformat(timespec="seconds")
+                                air_feature["label"] = "AIR"
+                                save_dict_csv(SAMPLES_CSV, air_feature)
+                                self.auto_air_to_samples_count = 0
 
                         self.baseline_buffer = []
 
