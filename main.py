@@ -27,31 +27,62 @@ BASELINE_CSV = os.path.join(DATA_DIR, "baseline_auto.csv")
 SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
 
-STARTUP_WARMUP_SEC = 600          # 프로그램 시작 안정화 10분
-COOLDOWN_SEC = 600                # 시료 후 쿨타임 10분
-RECOVERY_TOL = 0.15               # AIR 기준 대비 ±15%
+STARTUP_WARMUP_SEC = 600
+COOLDOWN_SEC = 600
+RECOVERY_TOL = 0.15
 CONFIDENCE_LIMIT = 70.0
 
-READY_SEC = 30                    # 학습/판별 전 준비 시간
-RECOVER_SEC = 300                 # 시료 제거 후 회복 기록 5분
+READY_SEC = 30
+RECOVER_SEC = 300
 
-# 자동 AIR 기준도 정밀학습처럼 30분으로 맞춤
-AUTO_BASELINE_SEC = 1800          # 30분
+AUTO_BASELINE_SEC = 1800
 AUTO_BASELINE_MIN_VALID_ROWS = 300
-
-# 자동 AIR 기준이 저장될 때 samples.csv에도 AIR 학습 데이터로 반영
 AUTO_AIR_TO_SAMPLES = True
 
-TRAIN_DURATIONS = [
-    ("빠른 테스트 2분", 120),
-    ("정밀학습 10분", 600),
-    ("정밀학습 20분", 1200),
-    ("정밀학습 30분", 1800),
+TRAIN_SEC = 1800
+
+# 단순 학습 메뉴
+# label은 판별용 최종 분류, level은 학습 조건 기록용
+TRAIN_PRESETS = [
+    {
+        "button": "정상공기 30분",
+        "label": "AIR",
+        "level": "AIR",
+        "amount_ml": "0",
+        "guide": "시료를 넣지 말고 정상공기 상태를 유지하세요.",
+    },
+    {
+        "button": "IPA 약함 0.1mL",
+        "label": "IPA",
+        "level": "LOW",
+        "amount_ml": "0.1",
+        "guide": "20cc 약병에 IPA 0.1mL를 넣고 주입하세요.",
+    },
+    {
+        "button": "에탄올 약함 0.1mL",
+        "label": "ETHANOL",
+        "level": "LOW",
+        "amount_ml": "0.1",
+        "guide": "20cc 약병에 에탄올 0.1mL를 넣고 주입하세요.",
+    },
+    {
+        "button": "IPA 강함 0.4mL",
+        "label": "IPA",
+        "level": "HIGH",
+        "amount_ml": "0.4",
+        "guide": "20cc 약병에 IPA 0.4mL를 넣고 주입하세요.",
+    },
+    {
+        "button": "에탄올 강함 0.4mL",
+        "label": "ETHANOL",
+        "level": "HIGH",
+        "amount_ml": "0.4",
+        "guide": "20cc 약병에 에탄올 0.4mL를 넣고 주입하세요.",
+    },
 ]
 
 # 히터 5단계
-# 형식: 이름, res_heat 값, 단계 유지시간, 안정화 버림시간
-# 실제 ℃가 아니라 res_heat 레지스터 코드 기반 단계입니다.
+# 이름, res_heat 값, 단계 유지시간, 안정화 버림시간
 HEATER_STEPS = [
     ("H1_LOW",  0x45, 15, 4),
     ("H2_MID1", 0x55, 15, 4),
@@ -431,7 +462,7 @@ def label_korean(label):
     return label
 
 
-def extract_features(rows, label, baseline_gas=None):
+def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None):
     valid_rows = [
         r for r in rows
         if r.get("gas_ohm", 0) > 0
@@ -463,6 +494,8 @@ def extract_features(rows, label, baseline_gas=None):
         "id": now.strftime("%Y%m%d_%H%M%S"),
         "timestamp": now.isoformat(timespec="seconds"),
         "label": label,
+        "level": level,
+        "amount_ml": amount_ml,
         "season": get_season(now.month),
         "period": get_period(now.hour),
         "hour": now.hour,
@@ -589,7 +622,7 @@ def classify(feature):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("BME688 정밀 학습/판별 시스템")
+        self.root.title("BME688 에탄올 / IPA 단순 학습 시스템")
         self.root.attributes("-fullscreen", True)
         self.fullscreen = True
 
@@ -615,6 +648,9 @@ class App:
 
         self.sample_mode = None
         self.pending_label = None
+        self.pending_level = "NONE"
+        self.pending_amount_ml = "0"
+        self.pending_guide = ""
         self.sample_rows = []
         self.sample_phase = None
         self.phase_until = 0
@@ -802,46 +838,40 @@ class App:
             return
 
         win = tk.Toplevel(self.root)
-        win.title("학습 선택")
-        win.geometry("460x520")
+        win.title("단순 학습 선택")
+        win.geometry("480x520")
         win.configure(bg=self.bg)
 
         tk.Label(
             win,
-            text="학습 대상과 시간을 선택하세요",
+            text="단순 학습 메뉴",
             bg=self.bg,
             fg=self.text,
-            font=("NanumGothic", 16, "bold"),
-        ).pack(pady=15)
+            font=("NanumGothic", 18, "bold"),
+        ).pack(pady=14)
 
-        for label_title, label in [
-            ("정상공기", "AIR"),
-            ("에탄올", "ETHANOL"),
-            ("IPA", "IPA"),
-        ]:
-            box = tk.LabelFrame(
+        tk.Label(
+            win,
+            text="각 항목은 30분 동안 히터 5단계를 반복하며 기록합니다.",
+            bg=self.bg,
+            fg=self.muted,
+            font=("NanumGothic", 11, "bold"),
+        ).pack(pady=4)
+
+        for preset in TRAIN_PRESETS:
+            tk.Button(
                 win,
-                text=label_title,
-                bg=self.bg,
+                text=preset["button"],
+                command=lambda p=preset, w=win: (w.destroy(), self.start_training_preset(p)),
+                font=("NanumGothic", 14, "bold"),
+                bg="#263847",
                 fg=self.text,
-                font=("NanumGothic", 12, "bold"),
-                padx=8,
-                pady=8,
-            )
-            box.pack(fill="x", padx=18, pady=6)
-
-            for duration_title, duration_sec in TRAIN_DURATIONS:
-                tk.Button(
-                    box,
-                    text=duration_title,
-                    command=lambda l=label, d=duration_sec, w=win: (w.destroy(), self.start_training(l, d)),
-                    font=("NanumGothic", 11, "bold"),
-                    bg="#263847",
-                    fg=self.text,
-                    relief="flat",
-                    padx=14,
-                    pady=6,
-                ).pack(side="left", padx=4, pady=4)
+                activebackground="#365369",
+                activeforeground="white",
+                relief="flat",
+                padx=20,
+                pady=12,
+            ).pack(fill="x", padx=32, pady=7)
 
     def open_detect_menu(self):
         if self.is_blocked():
@@ -1159,7 +1189,16 @@ class App:
     # -----------------------------------------------------
     # 학습 / 판별
     # -----------------------------------------------------
-    def start_training(self, label, duration_sec):
+    def start_training_preset(self, preset):
+        self.start_training(
+            label=preset["label"],
+            level=preset["level"],
+            amount_ml=preset["amount_ml"],
+            guide=preset["guide"],
+            duration_sec=TRAIN_SEC,
+        )
+
+    def start_training(self, label, level, amount_ml, guide, duration_sec):
         if self.is_blocked():
             return
 
@@ -1170,6 +1209,10 @@ class App:
 
         self.sample_mode = "LEARN"
         self.pending_label = label
+        self.pending_level = level
+        self.pending_amount_ml = amount_ml
+        self.pending_guide = guide
+
         self.sample_rows = []
         self.sample_phase = "READY"
         self.phase_until = time.time() + READY_SEC
@@ -1183,18 +1226,20 @@ class App:
 
         if label == "AIR":
             msg = "정상공기 상태를 그대로 유지하세요"
+            sub = "시료를 넣지 않습니다."
         else:
-            msg = "아직 시료를 넣지 마세요"
+            msg = "아직 시료를 주입하지 마세요"
+            sub = f"준비 후 안내가 뜨면 {guide}"
 
         self.show_notice(
-            f"{label_korean(label)} 정밀학습 준비",
+            f"{label_korean(label)} {level} 학습 준비",
             msg,
             remain=READY_SEC,
             color=self.notice_blue,
-            sub="준비가 끝나면 정밀학습이 시작됩니다.",
+            sub=sub,
         )
 
-        self.update_status(f"{label} 정밀학습 준비")
+        self.update_status(f"{label} {level} 학습 준비")
 
     def start_unknown(self, duration_sec):
         if self.is_blocked():
@@ -1207,6 +1252,10 @@ class App:
 
         self.sample_mode = "UNKNOWN"
         self.pending_label = "UNKNOWN"
+        self.pending_level = "UNKNOWN"
+        self.pending_amount_ml = "UNKNOWN"
+        self.pending_guide = "미지시료를 주입하세요."
+
         self.sample_rows = []
         self.sample_phase = "READY"
         self.phase_until = time.time() + READY_SEC
@@ -1220,16 +1269,22 @@ class App:
 
         self.show_notice(
             "미지시료 판별 준비",
-            "아직 시료를 넣지 마세요",
+            "아직 시료를 주입하지 마세요",
             remain=READY_SEC,
             color=self.notice_blue,
-            sub="준비가 끝나면 시료를 일정하게 노출하세요.",
+            sub="준비가 끝나면 미지시료를 일정하게 주입하세요.",
         )
 
         self.update_status("미지시료 판별 준비")
 
     def finish_sample(self):
-        feature = extract_features(self.sample_rows, self.pending_label, self.latest_air_gas)
+        feature = extract_features(
+            self.sample_rows,
+            self.pending_label,
+            self.pending_level,
+            self.pending_amount_ml,
+            self.latest_air_gas,
+        )
 
         if not feature:
             self.update_status("샘플 실패")
@@ -1245,21 +1300,25 @@ class App:
             return
 
         finished_label = self.pending_label
+        finished_level = self.pending_level
         finished_mode = self.sample_mode
 
         if finished_mode == "LEARN":
             save_dict_csv(SAMPLES_CSV, feature)
-            self.cards["현재상태"].config(text=f"{label_korean(finished_label)} 학습완료", fg="#4DFF88")
+            self.cards["현재상태"].config(
+                text=f"{label_korean(finished_label)} {finished_level} 학습완료",
+                fg="#4DFF88",
+            )
 
             sub = "시료를 제거하고 회복 기록으로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료"
             self.show_notice(
-                f"{label_korean(finished_label)} 학습 완료",
+                f"{label_korean(finished_label)} {finished_level} 학습 완료",
                 "히터 5단계 정밀학습 데이터가 저장되었습니다",
                 remain=None,
                 color=self.notice_green,
                 sub=sub,
             )
-            self.update_status(f"{finished_label} 학습 저장 완료")
+            self.update_status(f"{finished_label} {finished_level} 학습 저장 완료")
 
         else:
             pct, winner = classify(feature)
@@ -1279,6 +1338,9 @@ class App:
 
         self.sample_mode = None
         self.pending_label = None
+        self.pending_level = "NONE"
+        self.pending_amount_ml = "0"
+        self.pending_guide = ""
         self.sample_rows = []
         self.sample_phase = None
 
@@ -1303,7 +1365,7 @@ class App:
             self.cards["판별확률"].config(text="-")
             return
 
-        feature = extract_features(valid_detect, "REALTIME", self.latest_air_gas)
+        feature = extract_features(valid_detect, "REALTIME", "REALTIME", "UNKNOWN", self.latest_air_gas)
 
         if not feature:
             return
@@ -1349,7 +1411,7 @@ class App:
     def show_data_manager(self):
         win = tk.Toplevel(self.root)
         win.title("데이터 관리")
-        win.geometry("1380x800")
+        win.geometry("1420x800")
         win.configure(bg=self.bg)
 
         title = tk.Label(
@@ -1393,7 +1455,7 @@ class App:
 
     def build_table_tab(self, parent, csv_path, title):
         columns = (
-            "id", "timestamp", "label", "duration_sec", "count",
+            "id", "timestamp", "label", "level", "amount_ml", "duration_sec", "count",
             "gas_change_pct", "gas_avg", "gas_min", "gas_max",
             "h1_low_change_pct", "h2_mid1_change_pct", "h3_mid2_change_pct",
             "h4_high_change_pct", "h5_max_change_pct",
@@ -1414,6 +1476,8 @@ class App:
             "id": "ID",
             "timestamp": "시간",
             "label": "종류",
+            "level": "강도",
+            "amount_ml": "mL",
             "duration_sec": "시간초",
             "count": "개수",
             "gas_change_pct": "전체변화%",
@@ -1432,7 +1496,7 @@ class App:
 
         for c in columns:
             tree.heading(c, text=headings[c])
-            tree.column(c, width=82, anchor="center")
+            tree.column(c, width=78, anchor="center")
 
         detail = tk.Text(
             parent,
@@ -1601,7 +1665,13 @@ class App:
                     elapsed = time.time() - self.baseline_started_at
 
                     if elapsed >= AUTO_BASELINE_SEC:
-                        feature = extract_features(self.baseline_buffer, "AUTO_AIR_BASELINE")
+                        feature = extract_features(
+                            self.baseline_buffer,
+                            "AUTO_AIR_BASELINE",
+                            "AUTO",
+                            "0",
+                            None,
+                        )
 
                         if feature and int(feature.get("count", 0)) >= AUTO_BASELINE_MIN_VALID_ROWS:
                             save_dict_csv(BASELINE_CSV, feature)
@@ -1613,6 +1683,8 @@ class App:
                                 air_feature["id"] = datetime.now().strftime("%Y%m%d_%H%M%S") + "_AUTOAIR"
                                 air_feature["timestamp"] = datetime.now().isoformat(timespec="seconds")
                                 air_feature["label"] = "AIR"
+                                air_feature["level"] = "AUTO"
+                                air_feature["amount_ml"] = "0"
                                 save_dict_csv(SAMPLES_CSV, air_feature)
 
                             self.show_notice(
@@ -1642,27 +1714,27 @@ class App:
 
                             if self.pending_label == "AIR":
                                 message = "정상공기 상태를 그대로 유지하세요"
-                                sub = "히터 5단계가 반복되며 정상공기 패턴을 기록합니다."
+                                sub = "시료를 넣지 않습니다. 히터 5단계가 반복됩니다."
                             elif self.pending_label == "UNKNOWN":
-                                message = "미지시료를 센서 근처에\n일정하게 유지하세요"
+                                message = "미지시료를 센서 챔버로\n일정하게 주입하세요"
                                 sub = "히터 5단계가 반복되며 판별용 데이터를 기록합니다."
                             else:
-                                message = f"{label_korean(self.pending_label)}을\n센서 근처에 일정하게 유지하세요"
-                                sub = "중간에 뺐다 넣지 말고 일정한 위치와 농도를 유지하세요."
+                                message = self.pending_guide
+                                sub = "중간에 조건을 바꾸지 말고 일정하게 주입하세요."
 
                             self.show_notice(
-                                f"{label_korean(self.pending_label)} 정밀기록 중",
+                                f"{label_korean(self.pending_label)} {self.pending_level} 기록 중",
                                 message,
                                 remain=int(self.train_duration),
                                 color=self.notice_orange,
                                 sub=sub,
                             )
 
-                            self.update_status(f"{self.pending_label} 정밀기록 시작")
+                            self.update_status(f"{self.pending_label} {self.pending_level} 기록 시작")
                         else:
-                            msg = "정상공기 상태 유지" if self.pending_label == "AIR" else "아직 시료를 넣지 마세요"
+                            msg = "정상공기 상태 유지" if self.pending_label == "AIR" else "아직 시료를 주입하지 마세요"
                             self.show_notice(
-                                f"{label_korean(self.pending_label)} 준비",
+                                f"{label_korean(self.pending_label)} {self.pending_level} 준비",
                                 msg,
                                 remain=remain,
                                 color=self.notice_blue,
@@ -1696,14 +1768,14 @@ class App:
                             if self.pending_label == "AIR":
                                 message = "정상공기 상태를 그대로 유지하세요"
                             elif self.pending_label == "UNKNOWN":
-                                message = "미지시료를 센서 근처에\n일정하게 유지하세요"
+                                message = "미지시료를 일정하게 주입하세요"
                             else:
-                                message = f"{label_korean(self.pending_label)}을\n센서 근처에 일정하게 유지하세요"
+                                message = self.pending_guide
 
                             step_status = "기록중" if row.get("recordable") else "히터 안정화중"
                             cycle_text = f"히터: {heater_name} / {step_status} / 사이클: {self.training_cycle_count}"
                             self.show_notice(
-                                f"{label_korean(self.pending_label)} 정밀기록 중",
+                                f"{label_korean(self.pending_label)} {self.pending_level} 기록 중",
                                 message,
                                 remain=remain,
                                 color=self.notice_orange,
@@ -1796,9 +1868,9 @@ class App:
             self.ax_env.legend(facecolor=self.card, edgecolor="#314452", labelcolor=self.text)
 
             self.fig.suptitle(
-                "BME688 히터 안정화 반영 / 5단계 정밀 학습 / 에탄올 / IPA 판별 시스템",
+                "BME688 단순 학습: AIR / IPA 0.1mL / ETH 0.1mL / IPA 0.4mL / ETH 0.4mL",
                 color=self.text,
-                fontsize=16,
+                fontsize=15,
                 fontweight="bold",
             )
 
