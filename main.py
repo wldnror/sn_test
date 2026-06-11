@@ -17,9 +17,6 @@ import matplotlib.font_manager as fm
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
-# =========================================================
-# 기본 설정
-# =========================================================
 DATA_DIR = "bme688_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -39,44 +36,18 @@ AUTO_BASELINE_SEC = 1800
 AUTO_BASELINE_MIN_VALID_ROWS = 300
 AUTO_AIR_TO_SAMPLES = True
 
+MAX_AUTO_AIR_SAMPLES = 20
+MAX_BASELINE_ROWS = 100
+MAX_RAW_ROWS = 100000
+
 TRAIN_SEC = 1800
 
 TRAIN_PRESETS = [
-    {
-        "button": "정상공기 30분",
-        "label": "AIR",
-        "level": "AIR",
-        "amount_ml": "0",
-        "guide": "시료를 넣지 말고 정상공기 상태를 유지하세요.",
-    },
-    {
-        "button": "IPA 약함 0.1mL",
-        "label": "IPA",
-        "level": "LOW",
-        "amount_ml": "0.1",
-        "guide": "20cc 약병에 IPA 0.1mL를 넣고 주입하세요.",
-    },
-    {
-        "button": "에탄올 약함 0.1mL",
-        "label": "ETHANOL",
-        "level": "LOW",
-        "amount_ml": "0.1",
-        "guide": "20cc 약병에 에탄올 0.1mL를 넣고 주입하세요.",
-    },
-    {
-        "button": "IPA 강함 0.4mL",
-        "label": "IPA",
-        "level": "HIGH",
-        "amount_ml": "0.4",
-        "guide": "20cc 약병에 IPA 0.4mL를 넣고 주입하세요.",
-    },
-    {
-        "button": "에탄올 강함 0.4mL",
-        "label": "ETHANOL",
-        "level": "HIGH",
-        "amount_ml": "0.4",
-        "guide": "20cc 약병에 에탄올 0.4mL를 넣고 주입하세요.",
-    },
+    {"button": "정상공기 30분", "label": "AIR", "level": "AIR", "amount_ml": "0", "guide": "시료를 넣지 말고 정상공기 상태를 유지하세요."},
+    {"button": "IPA 약함 0.1mL", "label": "IPA", "level": "LOW", "amount_ml": "0.1", "guide": "20cc 약병에 IPA 0.1mL를 넣고 주입하세요."},
+    {"button": "에탄올 약함 0.1mL", "label": "ETHANOL", "level": "LOW", "amount_ml": "0.1", "guide": "20cc 약병에 에탄올 0.1mL를 넣고 주입하세요."},
+    {"button": "IPA 강함 0.4mL", "label": "IPA", "level": "HIGH", "amount_ml": "0.4", "guide": "20cc 약병에 IPA 0.4mL를 넣고 주입하세요."},
+    {"button": "에탄올 강함 0.4mL", "label": "ETHANOL", "level": "HIGH", "amount_ml": "0.4", "guide": "20cc 약병에 에탄올 0.4mL를 넣고 주입하세요."},
 ]
 
 HEATER_STEPS = [
@@ -87,10 +58,6 @@ HEATER_STEPS = [
     ("H5_MAX",  0x85, 15, 4),
 ]
 
-
-# =========================================================
-# 한글 폰트
-# =========================================================
 FONT_PATHS = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -106,9 +73,6 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["toolbar"] = "None"
 
 
-# =========================================================
-# SPI / BME688
-# =========================================================
 spi = spidev.SpiDev()
 spi.open(0, 0)
 spi.max_speed_hz = 50000
@@ -155,12 +119,10 @@ def write_reg_raw(reg, value):
 
 def set_mem_page(reg):
     status = read_reg_raw(REG_STATUS)
-
     if reg < 0x80:
         status |= 0x10
     else:
         status &= ~0x10
-
     write_reg_raw(REG_STATUS, status)
     time.sleep(0.001)
 
@@ -225,11 +187,9 @@ def read_calibration():
 
 def compensate_temp(temp_adc):
     global t_fine
-
     var1 = ((temp_adc / 16384.0) - (cal["par_t1"] / 1024.0)) * cal["par_t2"]
     var2 = (((temp_adc / 131072.0) - (cal["par_t1"] / 8192.0)) ** 2) * (cal["par_t3"] * 16.0)
     t_fine = var1 + var2
-
     return t_fine / 5120.0
 
 
@@ -253,7 +213,6 @@ def compensate_pressure(press_adc):
     var3 = (pressure / 256.0) ** 3 * (cal["par_p10"] / 131072.0)
 
     pressure += (var1 + var2 + var3 + (cal["par_p7"] * 128.0)) / 16.0
-
     return pressure / 100.0
 
 
@@ -265,9 +224,7 @@ def compensate_humidity(hum_adc, temp_c):
     )
     var3 = cal["par_h6"] / 16384.0
     var4 = cal["par_h7"] / 2097152.0
-
     humidity = var2 + ((var3 + (var4 * temp_c)) * var2 * var2)
-
     return max(0.0, min(100.0, humidity))
 
 
@@ -383,9 +340,6 @@ def read_sensor(heater_name, heater_value, heater_elapsed, heater_recordable):
     }
 
 
-# =========================================================
-# 데이터 / 판별
-# =========================================================
 def to_float(v, default=0.0):
     try:
         return float(v)
@@ -408,7 +362,6 @@ def mean(values):
 def stdev(values):
     if len(values) < 2:
         return 0.0
-
     m = mean(values)
     return math.sqrt(sum((x - m) ** 2 for x in values) / (len(values) - 1))
 
@@ -416,7 +369,6 @@ def stdev(values):
 def load_csv(path):
     if not os.path.exists(path):
         return []
-
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
             return list(csv.DictReader(f))
@@ -431,7 +383,6 @@ def write_csv(path, rows):
         return
 
     fieldnames = []
-
     for r in rows:
         for k in r.keys():
             if k not in fieldnames:
@@ -468,6 +419,27 @@ def save_dict_csv(path, row):
         rows = load_csv(path)
         rows.append(row)
         write_csv(path, rows)
+
+
+def trim_csv(path, max_rows):
+    rows = load_csv(path)
+    if len(rows) > max_rows:
+        write_csv(path, rows[-max_rows:])
+
+
+def trim_auto_air_samples():
+    rows = load_csv(SAMPLES_CSV)
+    manual = []
+    auto_air = []
+
+    for r in rows:
+        if r.get("label") == "AIR" and r.get("level") == "AUTO":
+            auto_air.append(r)
+        else:
+            manual.append(r)
+
+    auto_air = auto_air[-MAX_AUTO_AIR_SAMPLES:]
+    write_csv(SAMPLES_CSV, manual + auto_air)
 
 
 def count_labels():
@@ -637,11 +609,14 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
         "hum_avg": mean(hum),
         "hum_stdev": stdev(hum),
         "press_avg": mean(press),
+        "press_stdev": stdev(press),
+        "sensor_temp_avg": mean(temp),
+        "sensor_hum_avg": mean(hum),
+        "sensor_press_avg": mean(press),
     }
 
     add_segment_features(feature, valid_rows, "all", baseline_gas)
 
-    # 시간 구간별 특징: 초반 / 중반 / 후반
     n = len(valid_rows)
     one = max(1, n // 3)
     early_rows = valid_rows[:one]
@@ -652,12 +627,10 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
     add_segment_features(feature, mid_rows, "mid", baseline_gas)
     add_segment_features(feature, late_rows, "late", baseline_gas)
 
-    # 후반 유지율 / 초반 대비 변화
     early_avg = feature.get("early_gas_avg", 0)
     late_avg = feature.get("late_gas_avg", 0)
     feature["late_vs_early_pct"] = ((late_avg - early_avg) / early_avg) * 100.0 if early_avg else 0
 
-    # 히터별 비율
     h_avgs = {}
     h_mins = {}
 
@@ -706,30 +679,43 @@ def numeric_keys(row):
 
 
 def key_scale(key):
+    if key in ["temp_avg", "sensor_temp_avg"]:
+        return 0.25
+
+    if key in ["hum_avg", "sensor_hum_avg"]:
+        return 0.18
+
+    if key in ["press_avg", "sensor_press_avg"]:
+        return 0.04
+
     if key.endswith("_change_pct") or key.endswith("_vs_start_pct") or key.endswith("_vs_early_pct"):
-        return 2.7
+        return 2.8
 
     if "ratio" in key:
         return 45.0
 
     if key.endswith("_avg") or key.endswith("_min") or key.endswith("_max"):
         if "temp" in key:
-            return 0.4
-        if "hum" in key:
             return 0.25
+        if "hum" in key:
+            return 0.18
         if "press" in key:
-            return 0.05
+            return 0.04
         if "gas_range" in key:
             return 8.0
         if "gas_adc" in key:
             return 0.03
-        return 0.0007
+        return 0.00075
 
     if key.endswith("_stdev"):
         if "gas_range" in key:
             return 6.0
         if "gas_adc" in key:
             return 0.03
+        if "temp" in key:
+            return 0.2
+        if "hum" in key:
+            return 0.15
         return 0.0009
 
     if "time_to_min_ratio" in key:
@@ -760,6 +746,49 @@ def feature_distance(a, b):
     return total
 
 
+def env_weight(feature, sample):
+    ft = to_float(feature.get("sensor_temp_avg", feature.get("temp_avg", 0)))
+    st = to_float(sample.get("sensor_temp_avg", sample.get("temp_avg", 0)))
+    fh = to_float(feature.get("sensor_hum_avg", feature.get("hum_avg", 0)))
+    sh = to_float(sample.get("sensor_hum_avg", sample.get("hum_avg", 0)))
+    fp = to_float(feature.get("sensor_press_avg", feature.get("press_avg", 0)))
+    sp = to_float(sample.get("sensor_press_avg", sample.get("press_avg", 0)))
+
+    temp_diff = abs(ft - st)
+    hum_diff = abs(fh - sh)
+    press_diff = abs(fp - sp)
+
+    w = 1.0
+
+    if temp_diff <= 2:
+        w *= 1.35
+    elif temp_diff <= 5:
+        w *= 1.1
+    elif temp_diff >= 8:
+        w *= 0.65
+    else:
+        w *= 0.85
+
+    if hum_diff <= 5:
+        w *= 1.45
+    elif hum_diff <= 10:
+        w *= 1.15
+    elif hum_diff >= 18:
+        w *= 0.55
+    else:
+        w *= 0.75
+
+    if press_diff <= 3:
+        w *= 1.15
+    elif press_diff >= 10:
+        w *= 0.85
+
+    if sample.get("period") == feature.get("period"):
+        w *= 1.08
+
+    return w
+
+
 def classify(feature):
     samples = load_csv(SAMPLES_CSV)
     classes = ["AIR", "ETHANOL", "IPA"]
@@ -773,13 +802,7 @@ def classify(feature):
     for s in usable:
         d = feature_distance(feature, s)
         weight = 1.0 / (1.0 + d)
-
-        if s.get("season") == feature.get("season"):
-            weight *= 1.15
-
-        if s.get("period") == feature.get("period"):
-            weight *= 1.15
-
+        weight *= env_weight(feature, s)
         scores[s["label"]] += weight
 
     total = sum(scores.values())
@@ -793,9 +816,6 @@ def classify(feature):
     return pct, winner
 
 
-# =========================================================
-# APP
-# =========================================================
 class App:
     def __init__(self, root):
         self.root = root
@@ -861,9 +881,6 @@ class App:
 
         self.update_ui()
 
-    # -----------------------------------------------------
-    # UI
-    # -----------------------------------------------------
     def build_ui(self):
         top = tk.Frame(self.root, bg=self.bg)
         top.pack(fill="x", padx=12, pady=8)
@@ -952,12 +969,7 @@ class App:
         self.build_notice_overlay()
 
     def build_notice_overlay(self):
-        self.notice_frame = tk.Frame(
-            self.root,
-            bg=self.notice_blue,
-            bd=6,
-            relief="ridge",
-        )
+        self.notice_frame = tk.Frame(self.root, bg=self.notice_blue, bd=6, relief="ridge")
 
         self.notice_title = tk.Label(
             self.notice_frame,
@@ -1028,9 +1040,6 @@ class App:
     def hide_notice(self):
         self.notice_frame.place_forget()
 
-    # -----------------------------------------------------
-    # 메뉴
-    # -----------------------------------------------------
     def open_learn_menu(self):
         if self.is_blocked():
             return
@@ -1114,9 +1123,6 @@ class App:
             pady=10,
         ).pack(fill="x", padx=28, pady=8)
 
-    # -----------------------------------------------------
-    # 상태 / 모드
-    # -----------------------------------------------------
     def update_status(self, text=None):
         counts = count_labels()
 
@@ -1156,8 +1162,7 @@ class App:
 
         if not messagebox.askyesno(
             "초기 안정화 건너뛰기",
-            "초기 안정화를 건너뛰고 바로 AIR 기준 기록을 시작할까요?\n\n"
-            "센서가 충분히 예열되지 않았으면 AIR 기준이 흔들릴 수 있습니다."
+            "초기 안정화를 건너뛰고 바로 AIR 기준 기록을 시작할까요?\n\n센서가 충분히 예열되지 않았으면 AIR 기준이 흔들릴 수 있습니다."
         ):
             return
 
@@ -1226,8 +1231,7 @@ class App:
             remain = max(0, int(self.startup_warmup_until - time.time()))
             messagebox.showinfo(
                 "초기 안정화 중",
-                f"센서 초기 안정화 중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초\n\n"
-                "테스트 목적이면 상단의 안정화건너뛰기 버튼을 사용할 수 있습니다."
+                f"센서 초기 안정화 중입니다.\n남은 시간: {remain // 60}분 {remain % 60}초\n\n테스트 목적이면 상단의 안정화건너뛰기 버튼을 사용할 수 있습니다."
             )
             return True
 
@@ -1253,9 +1257,6 @@ class App:
 
         return False
 
-    # -----------------------------------------------------
-    # 히터 단계
-    # -----------------------------------------------------
     def update_heater_step(self):
         now = time.time()
         name, value, step_sec, settle_sec = HEATER_STEPS[self.current_heater_index]
@@ -1275,9 +1276,6 @@ class App:
 
         return name, value, elapsed, recordable_time
 
-    # -----------------------------------------------------
-    # 초기 안정화 / 쿨타임
-    # -----------------------------------------------------
     def check_startup_warmup(self):
         if not self.startup_warmup_active:
             return
@@ -1407,9 +1405,6 @@ class App:
             self.cards["현재상태"].config(text="쿨타임 종료 / 아직 미회복", fg="#FFD166")
             self.update_status("AIR 기준 범위 미회복")
 
-    # -----------------------------------------------------
-    # 학습 / 판별
-    # -----------------------------------------------------
     def start_training_preset(self, preset):
         self.start_training(
             label=preset["label"],
@@ -1572,9 +1567,6 @@ class App:
             self.baseline_started_at = None
             self.root.after(3000, self.hide_notice)
 
-    # -----------------------------------------------------
-    # 실시간 판별
-    # -----------------------------------------------------
     def run_realtime_detect(self):
         if not self.realtime_detect or self.sample_mode is not None:
             return
@@ -1626,32 +1618,27 @@ class App:
             text=f"AIR {pct['AIR']}% / ETH {pct['ETHANOL']}% / IPA {pct['IPA']}%"
         )
 
-    # -----------------------------------------------------
-    # 데이터 관리
-    # -----------------------------------------------------
     def show_data_manager(self):
         win = tk.Toplevel(self.root)
         win.title("데이터 관리")
         win.geometry("1420x800")
         win.configure(bg=self.bg)
 
-        title = tk.Label(
+        tk.Label(
             win,
             text="데이터 관리",
             bg=self.bg,
             fg=self.text,
             font=("NanumGothic", 18, "bold"),
-        )
-        title.pack(pady=8)
+        ).pack(pady=8)
 
-        summary = tk.Label(
+        tk.Label(
             win,
             text=f"저장폴더: {os.path.abspath(DATA_DIR)}",
             bg=self.bg,
             fg=self.text,
             font=("NanumGothic", 11),
-        )
-        summary.pack(pady=4)
+        ).pack(pady=4)
 
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1682,7 +1669,7 @@ class App:
             "late_vs_early_pct", "time_to_min_ratio",
             "h1_low_avg_ratio_to_h5", "h2_mid1_avg_ratio_to_h5",
             "h3_mid2_avg_ratio_to_h5", "h4_high_avg_ratio_to_h5",
-            "gas_range_avg", "temp_avg", "hum_avg"
+            "gas_range_avg", "temp_avg", "hum_avg", "press_avg"
         )
 
         frame = tk.Frame(parent, bg=self.bg)
@@ -1719,6 +1706,7 @@ class App:
             "gas_range_avg": "Range",
             "temp_avg": "온도",
             "hum_avg": "습도",
+            "press_avg": "기압",
         }
 
         for c in columns:
@@ -1747,7 +1735,7 @@ class App:
             if "ratio" in c:
                 return f"{fv:.3f}"
 
-            if "pct" in c or "temp" in c or "hum" in c or "range" in c:
+            if "pct" in c or "temp" in c or "hum" in c or "range" in c or "press" in c:
                 return f"{fv:.1f}"
 
             if c == "duration_sec":
@@ -1845,9 +1833,6 @@ class App:
         self.baseline_save_count = len(load_csv(BASELINE_CSV))
         self.update_status("데이터 변경 완료")
 
-    # -----------------------------------------------------
-    # 메인 루프
-    # -----------------------------------------------------
     def loop(self):
         sensor_init()
         self.update_status("센서 시작 완료")
@@ -1855,6 +1840,8 @@ class App:
         self.current_heater_index = 0
         self.heater_step_started_at = time.time()
         self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
+
+        raw_trim_counter = 0
 
         while self.running:
             try:
@@ -1866,6 +1853,11 @@ class App:
 
                 self.current_rows.append(row)
                 save_dict_csv(RAW_CSV, row)
+
+                raw_trim_counter += 1
+                if raw_trim_counter >= 1000:
+                    raw_trim_counter = 0
+                    trim_csv(RAW_CSV, MAX_RAW_ROWS)
 
                 if row.get("recordable"):
                     self.detect_rows.append(row)
@@ -1903,8 +1895,10 @@ class App:
 
                         if feature and int(feature.get("count", 0)) >= AUTO_BASELINE_MIN_VALID_ROWS:
                             save_dict_csv(BASELINE_CSV, feature)
+                            trim_csv(BASELINE_CSV, MAX_BASELINE_ROWS)
+
                             self.latest_air_gas = feature["gas_avg"]
-                            self.baseline_save_count += 1
+                            self.baseline_save_count = len(load_csv(BASELINE_CSV))
 
                             if AUTO_AIR_TO_SAMPLES:
                                 air_feature = dict(feature)
@@ -1914,6 +1908,7 @@ class App:
                                 air_feature["level"] = "AUTO"
                                 air_feature["amount_ml"] = "0"
                                 save_dict_csv(SAMPLES_CSV, air_feature)
+                                trim_auto_air_samples()
 
                             self.show_notice(
                                 "자동 AIR 기준 저장 완료",
@@ -2044,9 +2039,6 @@ class App:
 
             time.sleep(0.4)
 
-    # -----------------------------------------------------
-    # 그래프
-    # -----------------------------------------------------
     def style_axis(self, ax):
         ax.set_facecolor(self.card)
         ax.tick_params(colors=self.muted)
@@ -2105,9 +2097,6 @@ class App:
         if self.running:
             self.root.after(1000, self.update_ui)
 
-    # -----------------------------------------------------
-    # 종료
-    # -----------------------------------------------------
     def close(self):
         self.running = False
 
