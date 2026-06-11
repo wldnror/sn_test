@@ -47,22 +47,45 @@ AIR_DUP_GAS_DIFF_PCT = 7.0
 AIR_DUP_PATTERN_DIFF = 0.10
 AIR_DUP_NEAR_COUNT = 3
 
-TRAIN_SEC = 1800
+AIR_TRAIN_SEC = 1800
+GAS_TRAIN_SEC = 300
+UNKNOWN_SEC = 300
+
+DEFAULT_AMOUNT_ML = "0.05"
 
 TRAIN_PRESETS = [
-    {"button": "정상공기 30분", "label": "AIR", "level": "AIR", "amount_ml": "0", "guide": "시료를 넣지 말고 정상공기 상태를 유지하세요."},
-    {"button": "IPA 약함 0.1mL", "label": "IPA", "level": "LOW", "amount_ml": "0.1", "guide": "20cc 약병에 IPA 0.1mL를 넣고 주입하세요."},
-    {"button": "에탄올 약함 0.1mL", "label": "ETHANOL", "level": "LOW", "amount_ml": "0.1", "guide": "20cc 약병에 에탄올 0.1mL를 넣고 주입하세요."},
-    {"button": "IPA 강함 0.4mL", "label": "IPA", "level": "HIGH", "amount_ml": "0.4", "guide": "20cc 약병에 IPA 0.4mL를 넣고 주입하세요."},
-    {"button": "에탄올 강함 0.4mL", "label": "ETHANOL", "level": "HIGH", "amount_ml": "0.4", "guide": "20cc 약병에 에탄올 0.4mL를 넣고 주입하세요."},
+    {
+        "button": "정상공기 30분",
+        "label": "AIR",
+        "level": "AIR",
+        "amount_ml": "0",
+        "duration_sec": AIR_TRAIN_SEC,
+        "guide": "시료를 넣지 말고 정상공기 상태를 유지하세요.",
+    },
+    {
+        "button": "IPA 0.05mL 5분",
+        "label": "IPA",
+        "level": "STD",
+        "amount_ml": DEFAULT_AMOUNT_ML,
+        "duration_sec": GAS_TRAIN_SEC,
+        "guide": "20cc 약병에 IPA 0.05mL 기준으로 넣고 주입하세요.",
+    },
+    {
+        "button": "에탄올 0.05mL 5분",
+        "label": "ETHANOL",
+        "level": "STD",
+        "amount_ml": DEFAULT_AMOUNT_ML,
+        "duration_sec": GAS_TRAIN_SEC,
+        "guide": "20cc 약병에 에탄올 0.05mL 기준으로 넣고 주입하세요.",
+    },
 ]
 
 HEATER_STEPS = [
     ("H1_LOW",  0x45, 15, 4),
-    ("H2_MID1", 0x55, 15, 4),
-    ("H3_MID2", 0x65, 15, 4),
-    ("H4_HIGH", 0x73, 15, 4),
-    ("H5_MAX",  0x85, 15, 4),
+    ("H2_LOW2", 0x49, 15, 4),
+    ("H3_LOW3", 0x4D, 15, 4),
+    ("H4_LOW4", 0x51, 15, 4),
+    ("H5_LOW5", 0x55, 15, 4),
 ]
 
 FONT_PATHS = [
@@ -584,6 +607,24 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
     time_to_min_sec = min_epoch - start_epoch
     time_to_min_ratio = time_to_min_sec / duration
 
+    n = len(valid_rows)
+    one = max(1, n // 3)
+    early_rows = valid_rows[:one]
+    mid_rows = valid_rows[one:one * 2]
+    late_rows = valid_rows[one * 2:]
+
+    early_gas = [r["gas_ohm"] for r in early_rows]
+    mid_gas = [r["gas_ohm"] for r in mid_rows]
+    late_gas = [r["gas_ohm"] for r in late_rows]
+
+    early_avg = mean(early_gas)
+    mid_avg = mean(mid_gas)
+    late_avg = mean(late_gas)
+
+    evap_weighted_avg = (early_avg * 0.45) + (mid_avg * 0.35) + (late_avg * 0.20)
+    evap_drop_pct = ((late_avg - early_avg) / early_avg) * 100.0 if early_avg else 0.0
+    evap_mid_pct = ((mid_avg - early_avg) / early_avg) * 100.0 if early_avg else 0.0
+
     now = datetime.now()
 
     feature = {
@@ -592,6 +633,7 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
         "label": label,
         "level": level,
         "amount_ml": amount_ml,
+        "sample_sec": duration,
         "season": get_season(now.month),
         "period": get_period(now.hour),
         "hour": now.hour,
@@ -620,19 +662,19 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
         "sensor_temp_avg": mean(temp),
         "sensor_hum_avg": mean(hum),
         "sensor_press_avg": mean(press),
+        "evap_weighted_gas_avg": evap_weighted_avg,
+        "evap_drop_pct": evap_drop_pct,
+        "evap_mid_pct": evap_mid_pct,
+        "evap_early_gas_avg": early_avg,
+        "evap_mid_gas_avg": mid_avg,
+        "evap_late_gas_avg": late_avg,
     }
 
     add_segment_features(feature, valid_rows, "all", baseline_gas)
+    add_segment_features(feature, early_rows, "early", baseline_gas)
+    add_segment_features(feature, mid_rows, "mid", baseline_gas)
+    add_segment_features(feature, late_rows, "late", baseline_gas)
 
-    n = len(valid_rows)
-    one = max(1, n // 3)
-
-    add_segment_features(feature, valid_rows[:one], "early", baseline_gas)
-    add_segment_features(feature, valid_rows[one:one * 2], "mid", baseline_gas)
-    add_segment_features(feature, valid_rows[one * 2:], "late", baseline_gas)
-
-    early_avg = feature.get("early_gas_avg", 0)
-    late_avg = feature.get("late_gas_avg", 0)
     feature["late_vs_early_pct"] = ((late_avg - early_avg) / early_avg) * 100.0 if early_avg else 0
 
     h_avgs = {}
@@ -643,14 +685,14 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
         h_avgs[p] = feature.get(f"all_{p}_avg", 0)
         h_mins[p] = feature.get(f"all_{p}_min", 0)
 
-    h5_avg = h_avgs.get("h5_max", 0)
+    h5_avg = h_avgs.get("h5_low5", 0)
     h1_avg = h_avgs.get("h1_low", 0)
 
     for key, value in h_avgs.items():
         feature[f"{key}_avg_ratio_to_h5"] = value / h5_avg if h5_avg else 0
         feature[f"{key}_avg_ratio_to_h1"] = value / h1_avg if h1_avg else 0
 
-    h5_min = h_mins.get("h5_max", 0)
+    h5_min = h_mins.get("h5_low5", 0)
     h1_min = h_mins.get("h1_low", 0)
 
     for key, value in h_mins.items():
@@ -663,13 +705,13 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
 def air_pattern_diff(a, b):
     keys = [
         "h1_low_avg_ratio_to_h5",
-        "h2_mid1_avg_ratio_to_h5",
-        "h3_mid2_avg_ratio_to_h5",
-        "h4_high_avg_ratio_to_h5",
+        "h2_low2_avg_ratio_to_h5",
+        "h3_low3_avg_ratio_to_h5",
+        "h4_low4_avg_ratio_to_h5",
         "h1_low_min_ratio_to_h5",
-        "h2_mid1_min_ratio_to_h5",
-        "h3_mid2_min_ratio_to_h5",
-        "h4_high_min_ratio_to_h5",
+        "h2_low2_min_ratio_to_h5",
+        "h3_low3_min_ratio_to_h5",
+        "h4_low4_min_ratio_to_h5",
     ]
 
     diffs = []
@@ -754,8 +796,32 @@ def key_scale(key):
     if key in ["press_avg", "sensor_press_avg"]:
         return 0.04
 
+    if key.startswith("early_"):
+        if key.endswith("_change_pct"):
+            return 3.6
+        if key.endswith("_avg") or key.endswith("_min"):
+            return 0.0012
+
+    if key.startswith("mid_"):
+        if key.endswith("_change_pct"):
+            return 3.2
+        if key.endswith("_avg") or key.endswith("_min"):
+            return 0.0010
+
+    if key.startswith("late_"):
+        if key.endswith("_change_pct"):
+            return 1.2
+        if key.endswith("_avg") or key.endswith("_min"):
+            return 0.00035
+
+    if key in ["evap_weighted_gas_avg"]:
+        return 0.0014
+
+    if key in ["evap_drop_pct", "evap_mid_pct"]:
+        return 2.6
+
     if key.endswith("_change_pct") or key.endswith("_vs_start_pct") or key.endswith("_vs_early_pct"):
-        return 2.8
+        return 2.3
 
     if "ratio" in key:
         return 45.0
@@ -790,7 +856,7 @@ def key_scale(key):
     if "time_to_min_sec" in key:
         return 0.03
 
-    if "count" in key or "duration" in key:
+    if "count" in key or "duration" in key or "sample_sec" in key:
         return 0.001
 
     return 0.001
@@ -890,7 +956,6 @@ class App:
         self.fullscreen = True
 
         self.running = True
-
         self.auto_baseline = True
         self.realtime_detect = False
 
@@ -1111,13 +1176,13 @@ class App:
             return
 
         win = tk.Toplevel(self.root)
-        win.title("단순 학습 선택")
-        win.geometry("480x520")
+        win.title("학습 선택")
+        win.geometry("480x430")
         win.configure(bg=self.bg)
 
         tk.Label(
             win,
-            text="단순 학습 메뉴",
+            text="학습 메뉴",
             bg=self.bg,
             fg=self.text,
             font=("NanumGothic", 18, "bold"),
@@ -1125,7 +1190,7 @@ class App:
 
         tk.Label(
             win,
-            text="각 항목은 30분 동안 히터 5단계 패턴을 기록합니다.",
+            text="IPA/에탄올은 0.05mL 기준 5분 기록입니다.",
             bg=self.bg,
             fg=self.muted,
             font=("NanumGothic", 11, "bold"),
@@ -1180,7 +1245,7 @@ class App:
         tk.Button(
             win,
             text="미지시료 수동 판별 5분",
-            command=lambda w=win: (w.destroy(), self.start_unknown(300)),
+            command=lambda w=win: (w.destroy(), self.start_unknown(UNKNOWN_SEC)),
             font=("NanumGothic", 13, "bold"),
             bg="#263847",
             fg=self.text,
@@ -1477,7 +1542,7 @@ class App:
             level=preset["level"],
             amount_ml=preset["amount_ml"],
             guide=preset["guide"],
-            duration_sec=TRAIN_SEC,
+            duration_sec=preset.get("duration_sec", GAS_TRAIN_SEC),
         )
 
     def start_training(self, label, level, amount_ml, guide, duration_sec):
@@ -1535,7 +1600,7 @@ class App:
         self.sample_mode = "UNKNOWN"
         self.pending_label = "UNKNOWN"
         self.pending_level = "UNKNOWN"
-        self.pending_amount_ml = "UNKNOWN"
+        self.pending_amount_ml = DEFAULT_AMOUNT_ML
         self.pending_guide = "미지시료를 주입하세요."
 
         self.sample_rows = []
@@ -1595,7 +1660,7 @@ class App:
             sub = "시료를 제거하고 회복 단계로 전환됩니다." if finished_label in ["ETHANOL", "IPA"] else "정상공기 학습 완료"
             self.show_notice(
                 f"{label_korean(finished_label)} {finished_level} 학습 완료",
-                "정밀 패턴 feature가 저장되었습니다",
+                "5분 패턴 feature가 저장되었습니다",
                 remain=None,
                 color=self.notice_green,
                 sub=sub,
@@ -1644,7 +1709,7 @@ class App:
             self.cards["판별확률"].config(text="-")
             return
 
-        feature = extract_features(valid_detect, "REALTIME", "REALTIME", "UNKNOWN", self.latest_air_gas)
+        feature = extract_features(valid_detect, "REALTIME", "REALTIME", DEFAULT_AMOUNT_ML, self.latest_air_gas)
 
         if not feature:
             return
@@ -1729,12 +1794,12 @@ class App:
 
     def build_table_tab(self, parent, csv_path, title):
         columns = (
-            "id", "timestamp", "label", "level", "amount_ml", "duration_sec", "count",
+            "id", "timestamp", "label", "level", "amount_ml", "sample_sec", "count",
             "gas_change_pct", "gas_avg", "gas_min", "gas_max",
+            "evap_weighted_gas_avg", "evap_drop_pct", "evap_mid_pct",
             "early_gas_avg", "mid_gas_avg", "late_gas_avg",
-            "late_vs_early_pct", "time_to_min_ratio",
-            "h1_low_avg_ratio_to_h5", "h2_mid1_avg_ratio_to_h5",
-            "h3_mid2_avg_ratio_to_h5", "h4_high_avg_ratio_to_h5",
+            "h1_low_avg_ratio_to_h5", "h2_low2_avg_ratio_to_h5",
+            "h3_low3_avg_ratio_to_h5", "h4_low4_avg_ratio_to_h5",
             "gas_range_avg", "temp_avg", "hum_avg", "press_avg"
         )
 
@@ -1752,23 +1817,24 @@ class App:
             "id": "ID",
             "timestamp": "시간",
             "label": "종류",
-            "level": "강도",
+            "level": "조건",
             "amount_ml": "mL",
-            "duration_sec": "초",
+            "sample_sec": "초",
             "count": "개수",
             "gas_change_pct": "변화%",
             "gas_avg": "평균Ω",
             "gas_min": "최저Ω",
             "gas_max": "최고Ω",
+            "evap_weighted_gas_avg": "증발보정Ω",
+            "evap_drop_pct": "후/초%",
+            "evap_mid_pct": "중/초%",
             "early_gas_avg": "초반Ω",
             "mid_gas_avg": "중반Ω",
             "late_gas_avg": "후반Ω",
-            "late_vs_early_pct": "후/초%",
-            "time_to_min_ratio": "최저시간",
             "h1_low_avg_ratio_to_h5": "H1/H5",
-            "h2_mid1_avg_ratio_to_h5": "H2/H5",
-            "h3_mid2_avg_ratio_to_h5": "H3/H5",
-            "h4_high_avg_ratio_to_h5": "H4/H5",
+            "h2_low2_avg_ratio_to_h5": "H2/H5",
+            "h3_low3_avg_ratio_to_h5": "H3/H5",
+            "h4_low4_avg_ratio_to_h5": "H4/H5",
             "gas_range_avg": "Range",
             "temp_avg": "온도",
             "hum_avg": "습도",
@@ -1795,7 +1861,11 @@ class App:
             if fv is None:
                 return v
 
-            if c in ["gas_avg", "gas_min", "gas_max", "early_gas_avg", "mid_gas_avg", "late_gas_avg"]:
+            if c in [
+                "gas_avg", "gas_min", "gas_max",
+                "early_gas_avg", "mid_gas_avg", "late_gas_avg",
+                "evap_weighted_gas_avg"
+            ]:
                 return f"{fv:,.0f}"
 
             if "ratio" in c:
@@ -1804,7 +1874,7 @@ class App:
             if "pct" in c or "temp" in c or "hum" in c or "range" in c or "press" in c:
                 return f"{fv:.1f}"
 
-            if c == "duration_sec":
+            if c == "sample_sec":
                 return f"{fv:.0f}"
 
             return str(v)
@@ -2019,10 +2089,10 @@ class App:
                                 sub = "시료를 넣지 않습니다. 히터 5단계가 반복됩니다."
                             elif self.pending_label == "UNKNOWN":
                                 message = "미지시료를 센서 챔버로\n일정하게 주입하세요"
-                                sub = "히터 5단계가 반복되며 판별용 데이터를 기록합니다."
+                                sub = "5분 동안 판별용 패턴을 기록합니다."
                             else:
                                 message = self.pending_guide
-                                sub = "중간에 조건을 바꾸지 말고 일정하게 주입하세요."
+                                sub = "시료 증발을 감안해 초반/중반/후반 패턴을 분리 기록합니다."
 
                             self.show_notice(
                                 f"{label_korean(self.pending_label)} {self.pending_level} 기록 중",
@@ -2040,7 +2110,7 @@ class App:
                                 msg,
                                 remain=remain,
                                 color=self.notice_blue,
-                                sub="준비 시간이 끝나면 정밀기록이 시작됩니다.",
+                                sub="준비 시간이 끝나면 기록이 시작됩니다.",
                             )
                             self.update_status(f"{self.pending_label} 준비 {remain}초")
 
@@ -2164,7 +2234,7 @@ class App:
             self.ax_env.legend(facecolor=self.card, edgecolor="#314452", labelcolor=self.text)
 
             self.fig.suptitle(
-                "BME688 정밀 패턴 학습: AIR / IPA 0.1 / ETH 0.1 / IPA 0.4 / ETH 0.4",
+                "BME688 5분 패턴 학습: AIR / IPA 0.05mL / ETH 0.05mL",
                 color=self.text,
                 fontsize=15,
                 fontweight="bold",
