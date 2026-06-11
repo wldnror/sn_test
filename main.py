@@ -27,18 +27,20 @@ BASELINE_CSV = os.path.join(DATA_DIR, "baseline_auto.csv")
 SAMPLES_CSV = os.path.join(DATA_DIR, "samples.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log.csv")
 
-STARTUP_WARMUP_SEC = 600
-COOLDOWN_SEC = 600
-RECOVERY_TOL = 0.15
+STARTUP_WARMUP_SEC = 600          # 프로그램 시작 안정화 10분
+COOLDOWN_SEC = 600                # 시료 후 쿨타임 10분
+RECOVERY_TOL = 0.15               # AIR 기준 대비 ±15%
 CONFIDENCE_LIMIT = 70.0
 
-READY_SEC = 30
-RECOVER_SEC = 300
+READY_SEC = 30                    # 학습/판별 전 준비 시간
+RECOVER_SEC = 300                 # 시료 제거 후 회복 기록 5분
 
-# 자동 AIR 기준을 판별용 AIR 학습 데이터로도 넣는 주기
-# 1 = 자동 AIR 기준 저장될 때마다 samples.csv에도 AIR로 저장
-# 2 = 자동 AIR 기준 2번 저장마다 1번만 AIR 학습으로 반영
-AUTO_AIR_TO_SAMPLES_EVERY = 1
+# 자동 AIR 기준도 정밀학습처럼 30분으로 맞춤
+AUTO_BASELINE_SEC = 1800          # 30분
+AUTO_BASELINE_MIN_VALID_ROWS = 300
+
+# 자동 AIR 기준이 저장될 때 samples.csv에도 AIR 학습 데이터로 반영
+AUTO_AIR_TO_SAMPLES = True
 
 TRAIN_DURATIONS = [
     ("빠른 테스트 2분", 120),
@@ -47,12 +49,15 @@ TRAIN_DURATIONS = [
     ("정밀학습 30분", 1800),
 ]
 
+# 히터 5단계
+# 형식: 이름, res_heat 값, 단계 유지시간, 안정화 버림시간
+# 실제 ℃가 아니라 res_heat 레지스터 코드 기반 단계입니다.
 HEATER_STEPS = [
-    ("H1_LOW",  0x45, 8),
-    ("H2_MID1", 0x55, 8),
-    ("H3_MID2", 0x65, 8),
-    ("H4_HIGH", 0x73, 8),
-    ("H5_MAX",  0x85, 8),
+    ("H1_LOW",  0x45, 15, 4),
+    ("H2_MID1", 0x55, 15, 4),
+    ("H3_MID2", 0x65, 15, 4),
+    ("H4_HIGH", 0x73, 15, 4),
+    ("H5_MAX",  0x85, 15, 4),
 ]
 
 
@@ -303,7 +308,7 @@ def get_period(hour):
     return "야간"
 
 
-def read_sensor(heater_name, heater_value):
+def read_sensor(heater_name, heater_value, heater_elapsed, heater_recordable):
     set_heater(heater_value)
     trigger_measurement()
     time.sleep(0.8)
@@ -337,6 +342,8 @@ def read_sensor(heater_name, heater_value):
         "hour": now.hour,
         "heater": heater_name,
         "heater_value": heater_value,
+        "heater_elapsed": heater_elapsed,
+        "heater_recordable_time": heater_recordable,
         "temp_c": temp_c,
         "hum_pct": hum_pct,
         "press_hpa": press_hpa,
@@ -345,6 +352,7 @@ def read_sensor(heater_name, heater_value):
         "gas_range": gas_range,
         "gas_valid": gas_valid,
         "heat_stable": heat_stable,
+        "recordable": bool(heater_recordable and gas_valid and heat_stable and gas_ohm > 0),
     }
 
 
@@ -424,7 +432,14 @@ def label_korean(label):
 
 
 def extract_features(rows, label, baseline_gas=None):
-    valid_rows = [r for r in rows if r.get("gas_ohm", 0) > 0]
+    valid_rows = [
+        r for r in rows
+        if r.get("gas_ohm", 0) > 0
+        and r.get("gas_valid", True)
+        and r.get("heat_stable", True)
+        and r.get("recordable", True)
+    ]
+
     gas = [r["gas_ohm"] for r in valid_rows]
     temp = [r["temp_c"] for r in valid_rows]
     hum = [r["hum_pct"] for r in valid_rows]
@@ -465,7 +480,7 @@ def extract_features(rows, label, baseline_gas=None):
         "press_avg": mean(press),
     }
 
-    for heater_name, _, _ in HEATER_STEPS:
+    for heater_name, _, _, _ in HEATER_STEPS:
         hrows = [r for r in valid_rows if r.get("heater") == heater_name]
         hgas = [r["gas_ohm"] for r in hrows if r.get("gas_ohm", 0) > 0]
 
@@ -512,7 +527,7 @@ def feature_distance(a, b):
         ("press_avg", 0.05),
     ]
 
-    for heater_name, _, _ in HEATER_STEPS:
+    for heater_name, _, _, _ in HEATER_STEPS:
         p = heater_name.lower()
         keys.extend([
             (f"{p}_change_pct", 3.0),
@@ -590,13 +605,13 @@ class App:
         self.cooldown_until = 0
         self.cooldown_reason = ""
 
-        self.current_rows = deque(maxlen=500)
-        self.detect_rows = deque(maxlen=180)
+        self.current_rows = deque(maxlen=700)
+        self.detect_rows = deque(maxlen=300)
         self.baseline_buffer = []
+        self.baseline_started_at = None
 
         self.latest_air_gas = None
         self.baseline_save_count = len(load_csv(BASELINE_CSV))
-        self.auto_air_to_samples_count = 0
 
         self.sample_mode = None
         self.pending_label = None
@@ -605,8 +620,10 @@ class App:
         self.phase_until = 0
         self.expose_until = 0
         self.train_duration = 0
+
         self.current_heater_index = 0
         self.heater_switch_at = 0
+        self.heater_step_started_at = time.time()
         self.training_cycle_count = 0
 
         self.detect_history = deque(maxlen=3)
@@ -877,7 +894,15 @@ class App:
 
         detect_state = "실시간판별 ON" if self.realtime_detect else "실시간판별 OFF"
         base_state = "AIR기준기록 ON" if self.auto_baseline else "AIR기준기록 OFF"
-        buffer_state = f"버퍼 {len(self.baseline_buffer)}/180"
+
+        if self.baseline_started_at:
+            elapsed = int(time.time() - self.baseline_started_at)
+            remain = max(0, AUTO_BASELINE_SEC - elapsed)
+            buffer_state = f"AIR자동 {elapsed // 60:02d}:{elapsed % 60:02d}/{AUTO_BASELINE_SEC // 60}분"
+            buffer_state += f" 남음 {remain // 60:02d}:{remain % 60:02d}"
+        else:
+            buffer_state = "AIR자동 대기"
+
         save_state = f"AIR기준 {self.baseline_save_count}회"
         learn_state = f"AIR {counts['AIR']} / ETH {counts['ETHANOL']} / IPA {counts['IPA']}"
 
@@ -920,6 +945,9 @@ class App:
             self.auto_baseline = False
         else:
             self.auto_baseline = not self.auto_baseline
+            if not self.auto_baseline:
+                self.baseline_buffer = []
+                self.baseline_started_at = None
 
         self.update_status()
 
@@ -932,6 +960,7 @@ class App:
         if self.realtime_detect:
             self.auto_baseline = False
             self.baseline_buffer = []
+            self.baseline_started_at = None
             self.hide_notice()
             self.cards["현재상태"].config(text="실시간 판별중", fg="#00E5FF")
             self.update_status("실시간 판별 ON / AIR 기준 기록 자동 OFF")
@@ -978,8 +1007,7 @@ class App:
     # -----------------------------------------------------
     def update_heater_step(self):
         now = time.time()
-
-        name, value, dur = HEATER_STEPS[self.current_heater_index]
+        name, value, step_sec, settle_sec = HEATER_STEPS[self.current_heater_index]
 
         if now >= self.heater_switch_at:
             self.current_heater_index = (self.current_heater_index + 1) % len(HEATER_STEPS)
@@ -987,10 +1015,14 @@ class App:
             if self.current_heater_index == 0:
                 self.training_cycle_count += 1
 
-            name, value, dur = HEATER_STEPS[self.current_heater_index]
-            self.heater_switch_at = now + dur
+            name, value, step_sec, settle_sec = HEATER_STEPS[self.current_heater_index]
+            self.heater_switch_at = now + step_sec
+            self.heater_step_started_at = now
 
-        return name, value
+        elapsed = now - self.heater_step_started_at
+        recordable_time = elapsed >= settle_sec
+
+        return name, value, elapsed, recordable_time
 
     # -----------------------------------------------------
     # 초기 안정화 / 쿨타임
@@ -1003,6 +1035,7 @@ class App:
 
         if remain > 0:
             self.auto_baseline = False
+            self.baseline_started_at = None
             self.show_notice(
                 "초기 안정화 중",
                 "센서 예열 및 주변 공기 안정화 대기",
@@ -1016,13 +1049,14 @@ class App:
         self.startup_warmup_active = False
         self.auto_baseline = True
         self.baseline_buffer = []
+        self.baseline_started_at = None
 
         self.show_notice(
             "초기 안정화 완료",
-            "자동 AIR 기준 기록을 시작합니다",
+            "자동 AIR 기준 30분 기록을 시작합니다",
             remain=None,
             color=self.notice_green,
-            sub="정상공기 상태에서 기준 데이터가 쌓이고, 판별용 AIR 학습에도 반영됩니다.",
+            sub="정상공기 상태에서 히터 5단계 정밀 AIR 데이터가 쌓입니다.",
         )
         self.root.after(3000, self.hide_notice)
         self.update_status("초기 안정화 완료 / AIR 기준 기록 시작")
@@ -1035,6 +1069,7 @@ class App:
         self.auto_baseline = False
         self.realtime_detect = False
         self.baseline_buffer = []
+        self.baseline_started_at = None
         self.detect_history.clear()
 
         self.cards["현재상태"].config(text="시료 잔류 제거 대기", fg="#FFD166")
@@ -1062,7 +1097,7 @@ class App:
         if not self.latest_air_gas:
             return False
 
-        rows = list(self.current_rows)[-80:]
+        rows = [r for r in list(self.current_rows)[-120:] if r.get("recordable")]
         gas = [r["gas_ohm"] for r in rows if r["gas_ohm"] > 0]
 
         if len(gas) < 30:
@@ -1095,13 +1130,14 @@ class App:
             self.cooldown_reason = ""
             self.auto_baseline = True
             self.baseline_buffer = []
+            self.baseline_started_at = None
 
             self.show_notice(
                 "회복 완료",
                 "정상 공기 범위로 돌아왔습니다",
                 remain=None,
                 color=self.notice_green,
-                sub="자동 AIR 기준 기록을 다시 시작합니다.",
+                sub="자동 AIR 기준 30분 기록을 다시 시작합니다.",
             )
 
             self.cards["현재상태"].config(text="회복 완료 / AIR 기록 가능", fg="#4DFF88")
@@ -1109,6 +1145,7 @@ class App:
             self.root.after(3000, self.hide_notice)
         else:
             self.auto_baseline = False
+            self.baseline_started_at = None
             self.show_notice(
                 "쿨타임 종료 / 아직 미회복",
                 "AIR 기준 범위로 돌아오지 않았습니다\n계속 환기하세요",
@@ -1129,6 +1166,7 @@ class App:
         self.realtime_detect = False
         self.auto_baseline = False
         self.baseline_buffer = []
+        self.baseline_started_at = None
 
         self.sample_mode = "LEARN"
         self.pending_label = label
@@ -1139,6 +1177,7 @@ class App:
         self.train_duration = duration_sec
 
         self.current_heater_index = 0
+        self.heater_step_started_at = time.time()
         self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
         self.training_cycle_count = 0
 
@@ -1164,6 +1203,7 @@ class App:
         self.realtime_detect = False
         self.auto_baseline = False
         self.baseline_buffer = []
+        self.baseline_started_at = None
 
         self.sample_mode = "UNKNOWN"
         self.pending_label = "UNKNOWN"
@@ -1174,6 +1214,7 @@ class App:
         self.train_duration = duration_sec
 
         self.current_heater_index = 0
+        self.heater_step_started_at = time.time()
         self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
         self.training_cycle_count = 0
 
@@ -1198,7 +1239,7 @@ class App:
                 "유효한 데이터가 부족합니다",
                 remain=None,
                 color=self.notice_red,
-                sub="센서 상태를 확인하고 다시 시도하세요.",
+                sub="히터 안정화 이후 유효 데이터가 부족합니다.",
             )
             self.root.after(3000, self.hide_notice)
             return
@@ -1245,6 +1286,7 @@ class App:
             self.root.after(1500, lambda: self.start_cooldown(finished_label))
         elif finished_label == "AIR":
             self.auto_baseline = True
+            self.baseline_started_at = None
             self.root.after(3000, self.hide_notice)
 
     # -----------------------------------------------------
@@ -1254,12 +1296,14 @@ class App:
         if not self.realtime_detect or self.sample_mode is not None:
             return
 
-        if len(self.detect_rows) < 80:
+        valid_detect = [r for r in self.detect_rows if r.get("recordable")]
+
+        if len(valid_detect) < 80:
             self.cards["현재상태"].config(text="데이터 수집중", fg=self.text)
             self.cards["판별확률"].config(text="-")
             return
 
-        feature = extract_features(list(self.detect_rows), "REALTIME", self.latest_air_gas)
+        feature = extract_features(valid_detect, "REALTIME", self.latest_air_gas)
 
         if not feature:
             return
@@ -1517,6 +1561,7 @@ class App:
         self.update_status("센서 시작 완료")
 
         self.current_heater_index = 0
+        self.heater_step_started_at = time.time()
         self.heater_switch_at = time.time() + HEATER_STEPS[0][2]
 
         while self.running:
@@ -1524,14 +1569,18 @@ class App:
                 self.check_startup_warmup()
                 self.check_cooldown_release()
 
-                heater_name, heater_value = self.update_heater_step()
-                row = read_sensor(heater_name, heater_value)
+                heater_name, heater_value, heater_elapsed, heater_recordable = self.update_heater_step()
+                row = read_sensor(heater_name, heater_value, heater_elapsed, heater_recordable)
 
                 self.current_rows.append(row)
-                self.detect_rows.append(row)
                 save_dict_csv(RAW_CSV, row)
 
-                self.cards["히터단계"].config(text=heater_name)
+                if row.get("recordable"):
+                    self.detect_rows.append(row)
+
+                self.cards["히터단계"].config(
+                    text=f"{heater_name} {'기록' if row.get('recordable') else '안정화'}"
+                )
 
                 can_record_air_baseline = (
                     self.auto_baseline
@@ -1539,32 +1588,47 @@ class App:
                     and not self.cooldown_active
                     and not self.realtime_detect
                     and self.sample_mode is None
-                    and row["gas_valid"]
-                    and row["heat_stable"]
+                    and row.get("recordable")
                 )
 
                 if can_record_air_baseline:
+                    if self.baseline_started_at is None:
+                        self.baseline_started_at = time.time()
+                        self.baseline_buffer = []
+
                     self.baseline_buffer.append(row)
 
-                    if len(self.baseline_buffer) >= 180:
+                    elapsed = time.time() - self.baseline_started_at
+
+                    if elapsed >= AUTO_BASELINE_SEC:
                         feature = extract_features(self.baseline_buffer, "AUTO_AIR_BASELINE")
 
-                        if feature:
+                        if feature and int(feature.get("count", 0)) >= AUTO_BASELINE_MIN_VALID_ROWS:
                             save_dict_csv(BASELINE_CSV, feature)
                             self.latest_air_gas = feature["gas_avg"]
                             self.baseline_save_count += 1
 
-                            self.auto_air_to_samples_count += 1
-
-                            if self.auto_air_to_samples_count >= AUTO_AIR_TO_SAMPLES_EVERY:
+                            if AUTO_AIR_TO_SAMPLES:
                                 air_feature = dict(feature)
                                 air_feature["id"] = datetime.now().strftime("%Y%m%d_%H%M%S") + "_AUTOAIR"
                                 air_feature["timestamp"] = datetime.now().isoformat(timespec="seconds")
                                 air_feature["label"] = "AIR"
                                 save_dict_csv(SAMPLES_CSV, air_feature)
-                                self.auto_air_to_samples_count = 0
+
+                            self.show_notice(
+                                "자동 AIR 기준 저장 완료",
+                                "30분 AIR 기준 데이터가 저장되었습니다",
+                                remain=None,
+                                color=self.notice_green,
+                                sub="판별용 AIR 학습 데이터에도 반영되었습니다.",
+                            )
+                            self.root.after(3000, self.hide_notice)
+                            self.update_status("자동 AIR 기준 30분 저장 완료")
+                        else:
+                            self.update_status("자동 AIR 기준 저장 실패 / 유효 데이터 부족")
 
                         self.baseline_buffer = []
+                        self.baseline_started_at = None
 
                 if self.sample_mode:
                     now = time.time()
@@ -1607,7 +1671,9 @@ class App:
                             self.update_status(f"{self.pending_label} 준비 {remain}초")
 
                     elif self.sample_phase == "EXPOSE":
-                        self.sample_rows.append(row)
+                        if row.get("recordable"):
+                            self.sample_rows.append(row)
+
                         remain = max(0, int(self.expose_until - now))
 
                         if remain <= 0:
@@ -1634,7 +1700,8 @@ class App:
                             else:
                                 message = f"{label_korean(self.pending_label)}을\n센서 근처에 일정하게 유지하세요"
 
-                            cycle_text = f"히터: {heater_name} / 사이클: {self.training_cycle_count}"
+                            step_status = "기록중" if row.get("recordable") else "히터 안정화중"
+                            cycle_text = f"히터: {heater_name} / {step_status} / 사이클: {self.training_cycle_count}"
                             self.show_notice(
                                 f"{label_korean(self.pending_label)} 정밀기록 중",
                                 message,
@@ -1645,7 +1712,9 @@ class App:
                             self.update_status(f"{self.pending_label} 기록중 {remain // 60:02d}:{remain % 60:02d}")
 
                     elif self.sample_phase == "RECOVER":
-                        self.sample_rows.append(row)
+                        if row.get("recordable"):
+                            self.sample_rows.append(row)
+
                         remain = max(0, int(self.phase_until - now))
 
                         if remain <= 0:
@@ -1727,7 +1796,7 @@ class App:
             self.ax_env.legend(facecolor=self.card, edgecolor="#314452", labelcolor=self.text)
 
             self.fig.suptitle(
-                "BME688 히터 5단계 정밀 학습 / 에탄올 / IPA 판별 시스템",
+                "BME688 히터 안정화 반영 / 5단계 정밀 학습 / 에탄올 / IPA 판별 시스템",
                 color=self.text,
                 fontsize=16,
                 fontweight="bold",
