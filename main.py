@@ -40,6 +40,13 @@ MAX_AUTO_AIR_SAMPLES = 20
 MAX_BASELINE_ROWS = 100
 MAX_RAW_ROWS = 100000
 
+AIR_DUP_TEMP_DIFF = 2.0
+AIR_DUP_HUM_DIFF = 5.0
+AIR_DUP_PRESS_DIFF = 3.0
+AIR_DUP_GAS_DIFF_PCT = 7.0
+AIR_DUP_PATTERN_DIFF = 0.10
+AIR_DUP_NEAR_COUNT = 3
+
 TRAIN_SEC = 1800
 
 TRAIN_PRESETS = [
@@ -619,13 +626,10 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
 
     n = len(valid_rows)
     one = max(1, n // 3)
-    early_rows = valid_rows[:one]
-    mid_rows = valid_rows[one:one * 2]
-    late_rows = valid_rows[one * 2:]
 
-    add_segment_features(feature, early_rows, "early", baseline_gas)
-    add_segment_features(feature, mid_rows, "mid", baseline_gas)
-    add_segment_features(feature, late_rows, "late", baseline_gas)
+    add_segment_features(feature, valid_rows[:one], "early", baseline_gas)
+    add_segment_features(feature, valid_rows[one:one * 2], "mid", baseline_gas)
+    add_segment_features(feature, valid_rows[one * 2:], "late", baseline_gas)
 
     early_avg = feature.get("early_gas_avg", 0)
     late_avg = feature.get("late_gas_avg", 0)
@@ -656,6 +660,71 @@ def extract_features(rows, label, level="NONE", amount_ml="0", baseline_gas=None
     return feature
 
 
+def air_pattern_diff(a, b):
+    keys = [
+        "h1_low_avg_ratio_to_h5",
+        "h2_mid1_avg_ratio_to_h5",
+        "h3_mid2_avg_ratio_to_h5",
+        "h4_high_avg_ratio_to_h5",
+        "h1_low_min_ratio_to_h5",
+        "h2_mid1_min_ratio_to_h5",
+        "h3_mid2_min_ratio_to_h5",
+        "h4_high_min_ratio_to_h5",
+    ]
+
+    diffs = []
+
+    for k in keys:
+        av = to_float(a.get(k, 0))
+        bv = to_float(b.get(k, 0))
+        if av > 0 and bv > 0:
+            diffs.append(abs(av - bv))
+
+    return mean(diffs) if diffs else 999
+
+
+def gas_diff_pct(a, b):
+    ag = to_float(a.get("gas_avg", 0))
+    bg = to_float(b.get("gas_avg", 0))
+    if ag <= 0 or bg <= 0:
+        return 999
+    return abs(ag - bg) / bg * 100.0
+
+
+def is_similar_air(new_feature, old_feature):
+    temp_diff = abs(to_float(new_feature.get("sensor_temp_avg", 0)) - to_float(old_feature.get("sensor_temp_avg", old_feature.get("temp_avg", 0))))
+    hum_diff = abs(to_float(new_feature.get("sensor_hum_avg", 0)) - to_float(old_feature.get("sensor_hum_avg", old_feature.get("hum_avg", 0))))
+    press_diff = abs(to_float(new_feature.get("sensor_press_avg", 0)) - to_float(old_feature.get("sensor_press_avg", old_feature.get("press_avg", 0))))
+    gdiff = gas_diff_pct(new_feature, old_feature)
+    pdiff = air_pattern_diff(new_feature, old_feature)
+
+    return (
+        temp_diff <= AIR_DUP_TEMP_DIFF
+        and hum_diff <= AIR_DUP_HUM_DIFF
+        and press_diff <= AIR_DUP_PRESS_DIFF
+        and gdiff <= AIR_DUP_GAS_DIFF_PCT
+        and pdiff <= AIR_DUP_PATTERN_DIFF
+    )
+
+
+def should_save_air_baseline(feature):
+    baselines = load_csv(BASELINE_CSV)
+
+    if len(baselines) < 3:
+        return True, "초기 AIR 데이터 부족"
+
+    similar_count = 0
+
+    for old in baselines[-MAX_BASELINE_ROWS:]:
+        if is_similar_air(feature, old):
+            similar_count += 1
+
+    if similar_count >= AIR_DUP_NEAR_COUNT:
+        return False, f"비슷한 AIR 기준 {similar_count}개 있음"
+
+    return True, "새로운 AIR 조건"
+
+
 META_KEYS = {
     "id", "timestamp", "label", "level", "amount_ml",
     "season", "period", "hour",
@@ -664,17 +733,14 @@ META_KEYS = {
 
 def numeric_keys(row):
     keys = []
-
     for k, v in row.items():
         if k in META_KEYS:
             continue
-
         try:
             float(v)
             keys.append(k)
         except Exception:
             pass
-
     return keys
 
 
@@ -1894,31 +1960,44 @@ class App:
                         )
 
                         if feature and int(feature.get("count", 0)) >= AUTO_BASELINE_MIN_VALID_ROWS:
-                            save_dict_csv(BASELINE_CSV, feature)
-                            trim_csv(BASELINE_CSV, MAX_BASELINE_ROWS)
+                            save_ok, save_reason = should_save_air_baseline(feature)
 
-                            self.latest_air_gas = feature["gas_avg"]
-                            self.baseline_save_count = len(load_csv(BASELINE_CSV))
+                            if save_ok:
+                                save_dict_csv(BASELINE_CSV, feature)
+                                trim_csv(BASELINE_CSV, MAX_BASELINE_ROWS)
 
-                            if AUTO_AIR_TO_SAMPLES:
-                                air_feature = dict(feature)
-                                air_feature["id"] = datetime.now().strftime("%Y%m%d_%H%M%S") + "_AUTOAIR"
-                                air_feature["timestamp"] = datetime.now().isoformat(timespec="seconds")
-                                air_feature["label"] = "AIR"
-                                air_feature["level"] = "AUTO"
-                                air_feature["amount_ml"] = "0"
-                                save_dict_csv(SAMPLES_CSV, air_feature)
-                                trim_auto_air_samples()
+                                self.latest_air_gas = feature["gas_avg"]
+                                self.baseline_save_count = len(load_csv(BASELINE_CSV))
 
-                            self.show_notice(
-                                "자동 AIR 기준 저장 완료",
-                                "30분 AIR 기준 데이터가 저장되었습니다",
-                                remain=None,
-                                color=self.notice_green,
-                                sub="판별용 AIR 학습 데이터에도 반영되었습니다.",
-                            )
-                            self.root.after(3000, self.hide_notice)
-                            self.update_status("AIR 기준 저장 완료")
+                                if AUTO_AIR_TO_SAMPLES:
+                                    air_feature = dict(feature)
+                                    air_feature["id"] = datetime.now().strftime("%Y%m%d_%H%M%S") + "_AUTOAIR"
+                                    air_feature["timestamp"] = datetime.now().isoformat(timespec="seconds")
+                                    air_feature["label"] = "AIR"
+                                    air_feature["level"] = "AUTO"
+                                    air_feature["amount_ml"] = "0"
+                                    save_dict_csv(SAMPLES_CSV, air_feature)
+                                    trim_auto_air_samples()
+
+                                self.show_notice(
+                                    "자동 AIR 기준 저장 완료",
+                                    "새로운 AIR 조건으로 저장되었습니다",
+                                    remain=None,
+                                    color=self.notice_green,
+                                    sub=save_reason,
+                                )
+                                self.root.after(3000, self.hide_notice)
+                                self.update_status("AIR 기준 저장 완료")
+                            else:
+                                self.show_notice(
+                                    "자동 AIR 기준 저장 생략",
+                                    "기존 AIR와 비슷한 조건입니다",
+                                    remain=None,
+                                    color=self.notice_blue,
+                                    sub=save_reason,
+                                )
+                                self.root.after(3000, self.hide_notice)
+                                self.update_status("AIR 기준 저장 생략")
                         else:
                             self.update_status("AIR 기준 저장 실패")
 
