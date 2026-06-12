@@ -24,6 +24,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 SAMPLES_CSV = os.path.join(DATA_DIR, "samples_live.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log_live.csv")
 AIR_MEMORY_CSV = os.path.join(DATA_DIR, "air_memory.csv")
+AIR_HISTORY_CSV = os.path.join(DATA_DIR, "air_history.csv")
 
 MAX_RAW_ROWS = 100000
 
@@ -42,7 +43,11 @@ ACTIVE_HUM_RISE = 0.7
 
 AIR_STABLE_GAS_PCT = 2.0
 AIR_STABLE_HUM_DELTA = 0.5
-AIR_SLOW_ALPHA = 0.002
+AIR_SLOW_ALPHA = 0.0005
+
+AIR_HISTORY_INTERVAL_SEC = 30
+AIR_HISTORY_LOCK_AFTER_REACTION_SEC = 3 * 60 * 60
+MAX_AIR_HISTORY_ROWS = 1000
 
 DETECT_CONFIRM_COUNT = 2
 DECISION_DELAY_SEC = 3.0
@@ -812,6 +817,9 @@ class App:
         self.last_train_feature_time = 0
         self.train_saved_count = 0
 
+        self.last_reaction_time = 0
+        self.last_air_history_time = 0
+
         self.bg = "#101820"
         self.card = "#182632"
         self.text = "#EAF2F8"
@@ -936,7 +944,6 @@ class App:
 
     def update_status(self, msg=None):
         counts = count_labels()
-
         air_txt = "없음"
 
         if self.mem_air_gas and self.mem_air_hum is not None:
@@ -944,9 +951,17 @@ class App:
 
         state = msg if msg else self.last_state_text
 
+        lock_txt = ""
+        now = time.time()
+
+        if self.last_reaction_time > 0:
+            remain = AIR_HISTORY_LOCK_AFTER_REACTION_SEC - (now - self.last_reaction_time)
+            if remain > 0:
+                lock_txt = f" | AIR자동기록잠금 {int(remain // 60)}분"
+
         self.status_main.config(text=f"상태: {state}")
         self.status_sub.config(
-            text=f"AIR기준 {air_txt} | IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | 측정 {MEASURE_SLEEP_SEC:.2f}s"
+            text=f"AIR기준 {air_txt} | IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | 측정 {MEASURE_SLEEP_SEC:.2f}s{lock_txt}"
         )
 
     def restart_app(self):
@@ -1055,6 +1070,32 @@ class App:
         messagebox.showinfo("AIR 기준 저장", f"저장 완료\nGas {gas:,.0f}Ω\n습도 {hum:.1f}%")
         self.update_status("AIR 기준 저장 완료")
 
+    def save_air_history_row(self, row, gas_delta_pct, hum_delta):
+        now = row["epoch"]
+
+        if self.last_reaction_time > 0:
+            if now - self.last_reaction_time < AIR_HISTORY_LOCK_AFTER_REACTION_SEC:
+                return
+
+        if now - self.last_air_history_time < AIR_HISTORY_INTERVAL_SEC:
+            return
+
+        hist = {
+            "timestamp": row["timestamp"],
+            "epoch": row["epoch"],
+            "gas_ohm": row["gas_ohm"],
+            "hum_pct": row["hum_pct"],
+            "temp_c": row["temp_c"],
+            "press_hpa": row["press_hpa"],
+            "gas_delta_pct": gas_delta_pct,
+            "hum_delta": hum_delta,
+            "heater_value": row["heater_value"],
+        }
+
+        save_dict_csv(AIR_HISTORY_CSV, hist)
+        trim_csv(AIR_HISTORY_CSV, MAX_AIR_HISTORY_ROWS)
+        self.last_air_history_time = now
+
     def start_train(self, label):
         if self.train_mode:
             messagebox.showinfo("안내", "이미 학습 중입니다.")
@@ -1099,6 +1140,7 @@ class App:
             self.train_rows = []
             self.last_train_feature_time = 0
             self.train_saved_count = 0
+            self.last_reaction_time = now
 
             self.cards["현재상태"].config(
                 text=f"{label_detail_korean(self.train_label)} 주입 / 학습중",
@@ -1198,12 +1240,16 @@ class App:
             and abs(hum_delta) <= RETURN_HUM_DELTA
         )
 
+        if is_active:
+            self.last_reaction_time = now
+
         if self.live_state == "NORMAL":
             self.result_winner = None
             self.result_pct = {"IPA": 0.0, "ETHANOL": 0.0}
             self.detail_scores = {}
 
             if is_stable_air:
+                self.save_air_history_row(row, gas_delta_pct, hum_delta)
                 self.mem_air_gas = (self.mem_air_gas * (1.0 - AIR_SLOW_ALPHA)) + (row["gas_ohm"] * AIR_SLOW_ALPHA)
                 self.mem_air_hum = (self.mem_air_hum * (1.0 - AIR_SLOW_ALPHA)) + (row["hum_pct"] * AIR_SLOW_ALPHA)
                 self.mem_air_temp = (self.mem_air_temp * (1.0 - AIR_SLOW_ALPHA)) + (row["temp_c"] * AIR_SLOW_ALPHA)
@@ -1216,6 +1262,7 @@ class App:
             if self.detect_count >= DETECT_CONFIRM_COUNT:
                 self.live_state = "ANALYZE"
                 self.detect_start_time = now
+                self.last_reaction_time = now
                 self.normal_count = 0
                 self.rolling_rows.clear()
                 self.rolling_rows.append(row)
@@ -1423,6 +1470,99 @@ class App:
                     self.process_live(row)
 
                 self.cards["가스저항"].config(text=f"{row['gas_ohm']:,.0f} Ω")
+                self.update_status()
+
+            except Exception as e:
+                self.status_main.config(text=f"오류: {e}")
+                self.cards["현재상태"].config(text="오류", fg=self.red)
+
+            time.sleep(LOOP_SLEEP_SEC)
+
+    def update_ui(self):
+        rows = list(self.current_rows)
+
+        if rows:
+            self.ax_gas.clear()
+            self.ax_hum.clear()
+            self.style_axis(self.ax_gas)
+            self.style_axis(self.ax_hum)
+
+            now = time.time()
+            plot_rows = [r for r in rows if now - r["epoch"] <= ROLLING_WINDOW_SEC]
+
+            if plot_rows and self.mem_air_gas and self.mem_air_hum is not None:
+                t0 = plot_rows[0]["epoch"]
+                xs = [r["epoch"] - t0 for r in plot_rows]
+
+                gas_pct = [
+                    ((r["gas_ohm"] - self.mem_air_gas) / self.mem_air_gas) * 100.0
+                    for r in plot_rows
+                ]
+
+                hum_delta = [
+                    r["hum_pct"] - self.mem_air_hum
+                    for r in plot_rows
+                ]
+
+                self.ax_gas.plot(xs, gas_pct, linewidth=2.5)
+                self.ax_gas.axhline(0, linestyle="--", linewidth=1.0)
+                self.ax_gas.axhline(ACTIVE_GAS_DROP_PCT, linestyle="--", linewidth=1.0)
+                self.ax_gas.set_title("AIR 기준 Gas 변화율")
+                self.ax_gas.set_xlabel("최근 시간 (초)")
+                self.ax_gas.set_ylabel("Gas 변화율 (%)")
+
+                self.ax_hum.plot(xs, hum_delta, linewidth=2.5)
+                self.ax_hum.axhline(0, linestyle="--", linewidth=1.0)
+                self.ax_hum.axhline(ACTIVE_HUM_RISE, linestyle="--", linewidth=1.0)
+                self.ax_hum.set_title("AIR 기준 습도 변화량")
+                self.ax_hum.set_xlabel("최근 시간 (초)")
+                self.ax_hum.set_ylabel("습도 변화량 (%p)")
+
+            else:
+                t0 = rows[0]["epoch"]
+                xs = [r["epoch"] - t0 for r in rows[-100:]]
+                gas = [r["gas_ohm"] for r in rows[-100:]]
+                hum = [r["hum_pct"] for r in rows[-100:]]
+
+                self.ax_gas.plot(xs, gas, linewidth=2.0)
+                self.ax_gas.set_title("Gas 원본")
+                self.ax_gas.set_xlabel("시간 (초)")
+                self.ax_gas.set_ylabel("Gas 저항 (Ω)")
+
+                self.ax_hum.plot(xs, hum, linewidth=2.0)
+                self.ax_hum.set_title("습도 원본")
+                self.ax_hum.set_xlabel("시간 (초)")
+                self.ax_hum.set_ylabel("습도 (%)")
+
+            self.fig.suptitle(
+                "BME688 IPA / 에탄올 판별",
+                color=self.text,
+                fontsize=15,
+                fontweight="bold",
+            )
+
+            self.fig.tight_layout()
+            self.canvas.draw_idle()
+
+        if self.running:
+            self.root.after(UI_UPDATE_MS, self.update_ui)
+
+    def close(self):
+        self.running = False
+
+        try:
+            spi.close()
+        except Exception:
+            pass
+
+        self.root.destroy()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = App(root)
+    root.protocol("WM_DELETE_WINDOW", app.close)
+    root.mainloop()                self.cards["가스저항"].config(text=f"{row['gas_ohm']:,.0f} Ω")
                 self.update_status()
 
             except Exception as e:
