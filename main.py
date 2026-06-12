@@ -1032,7 +1032,7 @@ class App:
 
     def save_current_air_memory(self):
         rows = [
-            r for r in list(self.current_rows)[-40:]
+            r for r in list(self.current_rows)[-5:]
             if r.get("recordable") and r.get("gas_ohm", 0) > 0
         ]
 
