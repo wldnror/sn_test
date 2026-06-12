@@ -41,7 +41,6 @@ HEATER_VALUE = 0x45
 
 # Rolling 판별
 ROLLING_WINDOW_SEC = 10.0
-MIN_CLASSIFY_SEC = 1.0
 MIN_CLASSIFY_ROWS = 4
 
 # 반응 판정 기준
@@ -53,11 +52,15 @@ AIR_STABLE_GAS_PCT = 2.0
 AIR_STABLE_HUM_DELTA = 0.5
 AIR_SLOW_ALPHA = 0.002
 
-# 결과 안정화 / latch
+# 내부 판정 안정화
 DETECT_CONFIRM_COUNT = 2
 DECISION_DELAY_SEC = 3.0
-LOCK_MIN_SEC = 3.0
-NORMAL_RETURN_COUNT = 8
+
+# 정상 복귀 판정
+# AIR 보정보다 넓게 잡아야 결과가 계속 붙잡혀 있지 않음
+RETURN_GAS_PCT = 6.0
+RETURN_HUM_DELTA = 2.0
+NORMAL_RETURN_COUNT = 3
 
 # 학습
 TRAIN_READY_SEC = 3
@@ -687,7 +690,6 @@ def key_scale(key):
     if key == "count":
         return 0.01
 
-    # 습도 변화량 강화
     if key in ["hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_end_delta"]:
         return 10.0
 
@@ -700,18 +702,15 @@ def key_scale(key):
     if key in ["hum_avg", "hum_max", "hum_now", "hum_end"]:
         return 2.2
 
-    # 가스 변화율
     if key in ["gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct", "late_vs_early_pct"]:
         return 6.0
 
     if key == "gas_slope":
         return 0.008
 
-    # 절대 gas 값은 낮게
     if key in ["gas_now", "gas_avg", "gas_min", "gas_max", "gas_end"]:
         return 0.0010
 
-    # 패턴
     if key == "gas_smooth_score":
         return 160.0
 
@@ -721,7 +720,6 @@ def key_scale(key):
     if key == "gas_direction_changes":
         return 0.12
 
-    # 온도/기압은 보조
     if key == "temp_avg":
         return 0.15
 
@@ -815,7 +813,7 @@ def classify_ipa_ethanol(feature):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("BME688 LIVE IPA / 에탄올 판별")
+        self.root.title("BME688 IPA / 에탄올 판별")
         self.root.attributes("-fullscreen", True)
         self.fullscreen = True
 
@@ -838,17 +836,14 @@ class App:
 
         self.live_enabled = True
 
-        # NORMAL / DELAY / LOCKED
+        # NORMAL / ANALYZE / RESULT
         self.live_state = "NORMAL"
         self.detect_count = 0
         self.normal_count = 0
         self.detect_start_time = None
-        self.lock_start_time = None
-        self.locked_winner = None
-        self.locked_pct = {"IPA": 0.0, "ETHANOL": 0.0}
+        self.result_winner = None
+        self.result_pct = {"IPA": 0.0, "ETHANOL": 0.0}
 
-        self.last_pct = {"IPA": 0.0, "ETHANOL": 0.0}
-        self.last_winner = "-"
         self.last_state_text = "시작중"
 
         self.train_mode = None
@@ -920,7 +915,7 @@ class App:
             ("에탄올학습", lambda: self.start_train("ETHANOL")),
             ("IPA학습", lambda: self.start_train("IPA")),
             ("LIVE ON/OFF", self.toggle_live),
-            ("결과초기화", self.reset_live_state),
+            ("초기화", self.reset_live_state),
         ]
 
         for txt, cmd in buttons:
@@ -1004,9 +999,9 @@ class App:
 
         self.status_main.config(text=f"상태: {state}")
         self.status_sub.config(
-            text=f"LIVE {live} | 상태 {self.live_state} | AIR기준 {air_txt} | "
+            text=f"LIVE {live} | AIR기준 {air_txt} | "
                  f"IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | "
-                 f"측정 {MEASURE_SLEEP_SEC:.2f}s | 판정딜레이 {DECISION_DELAY_SEC:.1f}s"
+                 f"측정 {MEASURE_SLEEP_SEC:.2f}s"
         )
 
     def toggle_fullscreen(self):
@@ -1018,9 +1013,8 @@ class App:
         self.detect_count = 0
         self.normal_count = 0
         self.detect_start_time = None
-        self.lock_start_time = None
-        self.locked_winner = None
-        self.locked_pct = {"IPA": 0.0, "ETHANOL": 0.0}
+        self.result_winner = None
+        self.result_pct = {"IPA": 0.0, "ETHANOL": 0.0}
         self.rolling_rows.clear()
 
         self.cards["현재상태"].config(text="정상범위", fg=self.blue)
@@ -1141,7 +1135,7 @@ class App:
                     )
 
                     if feature:
-                        feature["train_type"] = "LIVE_LOCKED_DELAY_FINAL"
+                        feature["train_type"] = "FINAL_ANALYZE_RESULT_RETURN"
                         save_dict_csv(SAMPLES_CSV, feature)
                         self.train_saved_count += 1
                         self.last_train_feature_time = elapsed
@@ -1166,7 +1160,7 @@ class App:
         self.update_status("학습 완료 / LIVE 재시작")
 
     # ------------------------------------------------------------
-    # LIVE 판별: 3초 지연 + 결과 고정
+    # LIVE 판별
     # ------------------------------------------------------------
 
     def process_live(self, row):
@@ -1211,12 +1205,17 @@ class App:
             or hum_delta >= ACTIVE_HUM_RISE
         )
 
+        is_return_normal = (
+            abs(gas_delta_pct) <= RETURN_GAS_PCT
+            and abs(hum_delta) <= RETURN_HUM_DELTA
+        )
+
         # --------------------------------------------------------
         # NORMAL
         # --------------------------------------------------------
         if self.live_state == "NORMAL":
-            self.locked_winner = None
-            self.locked_pct = {"IPA": 0.0, "ETHANOL": 0.0}
+            self.result_winner = None
+            self.result_pct = {"IPA": 0.0, "ETHANOL": 0.0}
 
             if is_stable_air:
                 self.mem_air_gas = (self.mem_air_gas * (1.0 - AIR_SLOW_ALPHA)) + (row["gas_ohm"] * AIR_SLOW_ALPHA)
@@ -1229,17 +1228,16 @@ class App:
                 self.detect_count = 0
 
             if self.detect_count >= DETECT_CONFIRM_COUNT:
-                self.live_state = "DELAY"
+                self.live_state = "ANALYZE"
                 self.detect_start_time = now
                 self.normal_count = 0
                 self.rolling_rows.clear()
                 self.rolling_rows.append(row)
 
-                self.cards["현재상태"].config(text="반응 감지 / 판정 대기", fg=self.orange)
+                self.cards["현재상태"].config(text="분석중", fg=self.orange)
                 self.cards["IPA"].config(text="-")
                 self.cards["에탄올"].config(text="-")
-
-                self.last_state_text = "반응 감지 / 판정 대기"
+                self.last_state_text = "분석중"
                 return
 
             self.cards["현재상태"].config(text="정상범위", fg=self.blue)
@@ -1249,19 +1247,15 @@ class App:
             return
 
         # --------------------------------------------------------
-        # DELAY: 감지 후 3초간 모으고 확정
+        # ANALYZE
         # --------------------------------------------------------
-        if self.live_state == "DELAY":
+        if self.live_state == "ANALYZE":
             elapsed = now - self.detect_start_time if self.detect_start_time else 0.0
 
-            self.cards["현재상태"].config(
-                text=f"반응 감지 / 판정 대기 {elapsed:.1f}s",
-                fg=self.orange,
-            )
+            self.cards["현재상태"].config(text="분석중", fg=self.orange)
             self.cards["IPA"].config(text="-")
             self.cards["에탄올"].config(text="-")
-
-            self.last_state_text = f"판정 대기 {elapsed:.1f}s"
+            self.last_state_text = "분석중"
 
             if elapsed < DECISION_DELAY_SEC:
                 return
@@ -1269,8 +1263,8 @@ class App:
             clean = clean_rows(self.rolling_rows)
 
             if len(clean) < MIN_CLASSIFY_ROWS:
-                self.cards["현재상태"].config(text="판정 데이터 부족", fg=self.orange)
-                self.last_state_text = "판정 데이터 부족"
+                self.cards["현재상태"].config(text="분석중", fg=self.orange)
+                self.last_state_text = "분석중"
                 return
 
             feature = extract_live_feature(
@@ -1281,8 +1275,8 @@ class App:
             )
 
             if not feature:
-                self.cards["현재상태"].config(text="판정 feature 부족", fg=self.orange)
-                self.last_state_text = "판정 feature 부족"
+                self.cards["현재상태"].config(text="분석중", fg=self.orange)
+                self.last_state_text = "분석중"
                 return
 
             pct, winner = classify_ipa_ethanol(feature)
@@ -1294,45 +1288,35 @@ class App:
                 self.last_state_text = winner
                 return
 
-            self.locked_winner = winner
-            self.locked_pct = pct
-            self.lock_start_time = now
-            self.live_state = "LOCKED"
+            self.result_winner = winner
+            self.result_pct = pct
+            self.live_state = "RESULT"
             self.normal_count = 0
 
             self.cards["IPA"].config(text=f"{pct['IPA']:.1f}%")
             self.cards["에탄올"].config(text=f"{pct['ETHANOL']:.1f}%")
 
             color = self.yellow if winner == "IPA" else self.green
-            self.last_state_text = f"확정: {label_korean(winner)} {pct[winner]:.1f}%"
+            self.last_state_text = f"{label_korean(winner)} {pct[winner]:.1f}%"
             self.cards["현재상태"].config(text=self.last_state_text, fg=color)
             return
 
         # --------------------------------------------------------
-        # LOCKED: 정상범위로 돌아올 때까지 결과 고정
+        # RESULT
         # --------------------------------------------------------
-        if self.live_state == "LOCKED":
-            pct = self.locked_pct
-            winner = self.locked_winner
+        if self.live_state == "RESULT":
+            winner = self.result_winner
+            pct = self.result_pct
 
             if winner:
                 self.cards["IPA"].config(text=f"{pct['IPA']:.1f}%")
                 self.cards["에탄올"].config(text=f"{pct['ETHANOL']:.1f}%")
 
                 color = self.yellow if winner == "IPA" else self.green
-                self.cards["현재상태"].config(
-                    text=f"확정 유지: {label_korean(winner)} {pct[winner]:.1f}%",
-                    fg=color,
-                )
+                self.last_state_text = f"{label_korean(winner)} {pct[winner]:.1f}%"
+                self.cards["현재상태"].config(text=self.last_state_text, fg=color)
 
-                self.last_state_text = f"확정 유지: {label_korean(winner)}"
-
-            lock_elapsed = now - self.lock_start_time if self.lock_start_time else 0.0
-
-            if lock_elapsed < LOCK_MIN_SEC:
-                return
-
-            if is_stable_air and not is_active:
+            if is_return_normal:
                 self.normal_count += 1
             else:
                 self.normal_count = 0
@@ -1538,7 +1522,7 @@ class App:
                 self.ax_hum.set_ylabel("습도 (%)")
 
             self.fig.suptitle(
-                "BME688 LIVE 판별 - 3초 지연 확정 / 결과 고정",
+                "BME688 IPA / 에탄올 판별",
                 color=self.text,
                 fontsize=15,
                 fontweight="bold",
