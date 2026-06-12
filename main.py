@@ -1,4 +1,5 @@
 import os
+import sys
 import csv
 import math
 import time
@@ -792,7 +793,6 @@ class App:
         self.current_rows = deque(maxlen=2000)
         self.rolling_rows = deque(maxlen=300)
 
-        self.live_enabled = True
         self.live_state = "NORMAL"
         self.detect_count = 0
         self.normal_count = 0
@@ -862,10 +862,11 @@ class App:
 
         buttons = [
             ("종료", self.close),
+            ("재시작", self.restart_app),
             ("화면모드", self.toggle_fullscreen),
             ("데이터관리", self.show_data_manager),
+            ("학습", self.show_train_menu),
             ("AIR기준저장", self.save_current_air_memory),
-            ("LIVE ON/OFF", self.toggle_live),
             ("초기화", self.reset_live_state),
         ]
 
@@ -882,24 +883,6 @@ class App:
                 relief="flat",
                 padx=9,
                 pady=8,
-            ).pack(side="right", padx=3)
-
-        train_bar = tk.Frame(self.root, bg=self.bg)
-        train_bar.pack(fill="x", padx=12, pady=2)
-
-        for txt, label in TRAIN_BUTTONS:
-            tk.Button(
-                train_bar,
-                text=txt,
-                command=lambda x=label: self.start_train(x),
-                font=("NanumGothic", 10, "bold"),
-                bg="#30485A",
-                fg=self.text,
-                activebackground="#3F5F76",
-                activeforeground="white",
-                relief="flat",
-                padx=9,
-                pady=7,
             ).pack(side="right", padx=3)
 
         info = tk.Frame(self.root, bg=self.bg)
@@ -953,7 +936,6 @@ class App:
 
     def update_status(self, msg=None):
         counts = count_labels()
-        live = "ON" if self.live_enabled else "OFF"
 
         air_txt = "없음"
 
@@ -964,12 +946,76 @@ class App:
 
         self.status_main.config(text=f"상태: {state}")
         self.status_sub.config(
-            text=f"LIVE {live} | AIR기준 {air_txt} | IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | 측정 {MEASURE_SLEEP_SEC:.2f}s"
+            text=f"AIR기준 {air_txt} | IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | 측정 {MEASURE_SLEEP_SEC:.2f}s"
         )
+
+    def restart_app(self):
+        self.running = False
+        try:
+            spi.close()
+        except Exception:
+            pass
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
 
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
         self.root.attributes("-fullscreen", self.fullscreen)
+
+    def show_train_menu(self):
+        if self.train_mode:
+            messagebox.showinfo("안내", "이미 학습 중입니다.")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("학습 선택")
+        win.geometry("520x430")
+        win.configure(bg=self.bg)
+        win.attributes("-topmost", True)
+
+        tk.Label(
+            win,
+            text="학습 종류 선택",
+            bg=self.bg,
+            fg=self.text,
+            font=("NanumGothic", 18, "bold"),
+        ).pack(pady=18)
+
+        box = tk.Frame(win, bg=self.bg)
+        box.pack(fill="both", expand=True, padx=20, pady=5)
+
+        def start_and_close(label):
+            win.destroy()
+            self.start_train(label)
+
+        for txt, label in TRAIN_BUTTONS:
+            tk.Button(
+                box,
+                text=txt,
+                command=lambda x=label: start_and_close(x),
+                font=("NanumGothic", 14, "bold"),
+                bg="#30485A",
+                fg=self.text,
+                activebackground="#3F5F76",
+                activeforeground="white",
+                relief="flat",
+                padx=10,
+                pady=10,
+            ).pack(fill="x", pady=4)
+
+        tk.Button(
+            win,
+            text="닫기",
+            command=win.destroy,
+            font=("NanumGothic", 13, "bold"),
+            bg="#263847",
+            fg=self.text,
+            activebackground="#365369",
+            activeforeground="white",
+            relief="flat",
+            padx=10,
+            pady=10,
+        ).pack(fill="x", padx=20, pady=12)
 
     def reset_live_state(self):
         self.live_state = "NORMAL"
@@ -984,12 +1030,6 @@ class App:
         self.cards["IPA"].config(text="-")
         self.cards["에탄올"].config(text="-")
         self.last_state_text = "정상범위"
-
-    def toggle_live(self):
-        self.live_enabled = not self.live_enabled
-        self.reset_live_state()
-        self.cards["현재상태"].config(text="LIVE ON" if self.live_enabled else "LIVE OFF", fg=self.blue)
-        self.update_status("LIVE ON" if self.live_enabled else "LIVE OFF")
 
     def save_current_air_memory(self):
         rows = [
@@ -1024,7 +1064,6 @@ class App:
             messagebox.showinfo("안내", "먼저 깨끗한 공기 상태에서 AIR기준저장을 눌러주세요.")
             return
 
-        self.live_enabled = False
         self.reset_live_state()
 
         self.train_mode = "TRAIN"
@@ -1109,7 +1148,6 @@ class App:
         self.train_rows = []
         self.train_phase = None
 
-        self.live_enabled = True
         self.reset_live_state()
 
         messagebox.showinfo("학습 완료", f"{label_detail_korean(label)} 학습 완료\n누적 feature {saved}개 저장")
@@ -1117,9 +1155,6 @@ class App:
         self.update_status("학습 완료 / LIVE 재시작")
 
     def process_live(self, row):
-        if not self.live_enabled:
-            return
-
         if self.train_mode:
             return
 
