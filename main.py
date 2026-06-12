@@ -109,6 +109,7 @@ GROUP_LABELS = {
     "IPA_HIGH": "IPA",
     "IPA_LOW": "IPA",
     "IPA_1000": "IPA",
+    "IPA_10000": "IPA",
     "ETHANOL": "ETHANOL",
     "ETHANOL_HIGH": "ETHANOL",
     "ETHANOL_LOW": "ETHANOL",
@@ -120,6 +121,7 @@ TRAIN_BUTTONS = [
     ("IPA 원액", "IPA_HIGH"),
     ("IPA 0.05", "IPA_LOW"),
     ("IPA 1000ppm", "IPA_1000"),
+    ("IPA 10000ppm", "IPA_10000"),
 ]
 
 
@@ -427,6 +429,7 @@ def label_detail_korean(label):
         "IPA_HIGH": "IPA 원액",
         "IPA_LOW": "IPA 0.05",
         "IPA_1000": "IPA 1000ppm",
+        "IPA_10000": "IPA 10000ppm",
     }
     return names.get(label, label)
 
