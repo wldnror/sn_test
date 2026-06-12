@@ -24,44 +24,40 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 DATA_DIR = "bme688_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-SAMPLES_CSV = os.path.join(DATA_DIR, "samples_realtime.csv")
-RAW_CSV = os.path.join(DATA_DIR, "raw_log_realtime.csv")
+SAMPLES_CSV = os.path.join(DATA_DIR, "samples_live.csv")
+RAW_CSV = os.path.join(DATA_DIR, "raw_log_live.csv")
 AIR_MEMORY_CSV = os.path.join(DATA_DIR, "air_memory.csv")
 
 MAX_RAW_ROWS = 100000
 
-# 200ms급 실시간 측정
+# 200ms급 측정
 MEASURE_SLEEP_SEC = 0.20
 LOOP_SLEEP_SEC = 0.005
 UI_UPDATE_MS = 200
 
-# 실시간 판별
-REALTIME_DEFAULT_ON = True
-
 # 히터 고정
-FAST_HEATER_NAME = "H1_LOW_FIXED"
-FAST_HEATER_VALUE = 0x45
+HEATER_NAME = "H1_LOW_FIXED"
+HEATER_VALUE = 0x45
 
-# 가스 감지 조건
-TRIGGER_GAS_DROP_PCT = -3.0       # AIR 기준 대비 -3%
-TRIGGER_HUM_RISE = 0.7            # AIR 기준 대비 +0.7%p
-TRIGGER_CONFIRM_COUNT = 2         # 연속 2회 감지
+# Rolling 실시간 판단
+ROLLING_WINDOW_SEC = 10.0
+MIN_CLASSIFY_SEC = 1.0
+MIN_CLASSIFY_ROWS = 4
 
-# 판별 표시 시작 / 이벤트 최대 길이
-MIN_REALTIME_SEC = 0.8
-MAX_EVENT_SEC = 30.0
+# 정상범위 / 판별범위 기준
+ACTIVE_GAS_DROP_PCT = -3.0     # AIR 기준 대비 gas -3% 이하이면 반응 있음
+ACTIVE_HUM_RISE = 0.7          # AIR 기준 대비 습도 +0.7%p 이상이면 반응 있음
 
-# 평상시 AIR 기준 아주 느린 보정
-AIR_SLOW_ALPHA = 0.003
+# AIR 기준 자동 보정 조건
+AIR_STABLE_GAS_PCT = 2.0       # ±2% 안이면 공기 안정으로 봄
+AIR_STABLE_HUM_DELTA = 0.5     # ±0.5%p 안이면 공기 안정으로 봄
+AIR_SLOW_ALPHA = 0.002         # 기준값 천천히 보정
 
 # 학습
 TRAIN_READY_SEC = 3
 TRAIN_RECORD_SEC = 30
 TRAIN_FEATURE_INTERVAL_SEC = 0.5
-
-# 학습 데이터 최소 조건
 MIN_TRAIN_ROWS = 10
-MIN_CLASSIFY_ROWS = 4
 
 # 폰트
 FONT_PATHS = [
@@ -282,11 +278,11 @@ def sensor_init():
     write_reg(REG_CONFIG, 0x08)
     write_reg(REG_CTRL_HUM, 0x01)
     write_reg(REG_CTRL_GAS_0, 0x00)
-    set_heater(FAST_HEATER_VALUE)
+    set_heater(HEATER_VALUE)
 
 
 def read_sensor():
-    set_heater(FAST_HEATER_VALUE)
+    set_heater(HEATER_VALUE)
     trigger_measurement()
     time.sleep(MEASURE_SLEEP_SEC)
 
@@ -314,8 +310,8 @@ def read_sensor():
     return {
         "timestamp": now.isoformat(timespec="milliseconds"),
         "epoch": time.time(),
-        "heater": FAST_HEATER_NAME,
-        "heater_value": FAST_HEATER_VALUE,
+        "heater": HEATER_NAME,
+        "heater_value": HEATER_VALUE,
         "temp_c": temp_c,
         "hum_pct": hum_pct,
         "press_hpa": press_hpa,
@@ -434,6 +430,8 @@ def label_korean(label):
         return "에탄올"
     if label == "IPA":
         return "IPA"
+    if label == "NORMAL":
+        return "정상범위"
     return label
 
 
@@ -524,7 +522,7 @@ def calc_shape(rows):
     }
 
 
-def extract_feature(rows, trigger_gas, trigger_hum, label="UNKNOWN"):
+def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     rows = clean_rows(rows)
 
     if len(rows) < MIN_CLASSIFY_ROWS:
@@ -539,26 +537,31 @@ def extract_feature(rows, trigger_gas, trigger_hum, label="UNKNOWN"):
     end_epoch = rows[-1]["epoch"]
     duration = max(0.001, end_epoch - start_epoch)
 
-    gas_ref = trigger_gas if trigger_gas and trigger_gas > 0 else gas[0]
-    hum_ref = trigger_hum if trigger_hum is not None else hum[0]
+    gas_ref = air_gas if air_gas and air_gas > 0 else gas[0]
+    hum_ref = air_hum if air_hum is not None else hum[0]
 
-    gas_end = mean(gas[-min(5, len(gas)):])
+    gas_now = gas[-1]
+    hum_now = hum[-1]
+
     gas_min = min(gas)
     gas_max = max(gas)
+    gas_avg = mean(gas)
+    gas_end = mean(gas[-min(5, len(gas)):])
 
-    hum_end = mean(hum[-min(5, len(hum)):])
     hum_min = min(hum)
     hum_max = max(hum)
+    hum_avg = mean(hum)
+    hum_end = mean(hum[-min(5, len(hum)):])
 
-    gas_drop_pct = ((gas_min - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
-    gas_end_vs_start_pct = ((gas_end - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
-    gas_now_pct = ((gas[-1] - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
+    gas_now_pct = ((gas_now - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
+    gas_min_pct = ((gas_min - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
+    gas_avg_pct = ((gas_avg - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
+    gas_end_pct = ((gas_end - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
 
-    hum_rise_abs = hum_max - hum_ref
-    hum_end_vs_start = hum_end - hum_ref
-    hum_now_delta = hum[-1] - hum_ref
-
-    shape = calc_shape(rows)
+    hum_now_delta = hum_now - hum_ref
+    hum_max_delta = hum_max - hum_ref
+    hum_avg_delta = hum_avg - hum_ref
+    hum_end_delta = hum_end - hum_ref
 
     early_n = max(2, min(len(rows), len(rows) // 3))
     late_n = max(2, min(len(rows), len(rows) // 3))
@@ -568,46 +571,50 @@ def extract_feature(rows, trigger_gas, trigger_hum, label="UNKNOWN"):
     early_hum = mean(hum[:early_n])
     late_hum = mean(hum[-late_n:])
 
+    shape = calc_shape(rows)
+
     return {
         "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3],
         "timestamp": datetime.now().isoformat(timespec="milliseconds"),
         "label": label,
 
-        "elapsed_sec": duration,
+        "duration_sec": duration,
         "count": len(rows),
 
         "gas_ref": gas_ref,
-        "gas_avg": mean(gas),
+        "gas_now": gas_now,
+        "gas_avg": gas_avg,
         "gas_min": gas_min,
         "gas_max": gas_max,
-        "gas_now": gas[-1],
         "gas_end": gas_end,
-        "gas_drop_pct": gas_drop_pct,
+
         "gas_now_pct": gas_now_pct,
-        "gas_end_vs_start_pct": gas_end_vs_start_pct,
-        "gas_slope": (gas_end - gas_ref) / duration,
+        "gas_min_pct": gas_min_pct,
+        "gas_avg_pct": gas_avg_pct,
+        "gas_end_pct": gas_end_pct,
+
+        "gas_slope": (gas_end - early_gas) / duration,
+        "late_vs_early_pct": ((late_gas - early_gas) / early_gas) * 100.0 if early_gas else 0.0,
 
         "hum_ref": hum_ref,
-        "hum_avg": mean(hum),
+        "hum_now": hum_now,
+        "hum_avg": hum_avg,
         "hum_min": hum_min,
         "hum_max": hum_max,
-        "hum_now": hum[-1],
         "hum_end": hum_end,
-        "hum_rise_abs": hum_rise_abs,
+
         "hum_now_delta": hum_now_delta,
-        "hum_end_vs_start": hum_end_vs_start,
-        "hum_rise_speed": hum_rise_abs / duration,
-
-        "temp_avg": mean(temp),
-        "press_avg": mean(press),
-
-        "early_gas_avg": early_gas,
-        "late_gas_avg": late_gas,
-        "late_vs_early_pct": ((late_gas - early_gas) / early_gas) * 100.0 if early_gas else 0.0,
+        "hum_max_delta": hum_max_delta,
+        "hum_avg_delta": hum_avg_delta,
+        "hum_end_delta": hum_end_delta,
+        "hum_rise_speed": hum_max_delta / duration,
 
         "early_hum_avg": early_hum,
         "late_hum_avg": late_hum,
         "late_hum_vs_early": late_hum - early_hum,
+
+        "temp_avg": mean(temp),
+        "press_avg": mean(press),
 
         "gas_smooth_score": shape["smooth"],
         "gas_slope_avg": shape["slope_avg"],
@@ -640,58 +647,59 @@ def numeric_keys(row):
 
 
 def key_scale(key):
-    if key in ["elapsed_sec"]:
-        return 0.6
+    # 시간은 같은 시점대 데이터와 비교하기 위해 사용
+    if key == "duration_sec":
+        return 0.8
 
-    if key in ["count"]:
+    if key == "count":
         return 0.01
 
-    # 가장 중요: 습도 변화
-    if key in ["hum_rise_abs", "hum_now_delta", "hum_end_vs_start"]:
+    # 습도 변화 핵심
+    if key in ["hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_end_delta"]:
         return 7.0
 
-    if key in ["hum_rise_speed"]:
+    if key == "hum_rise_speed":
         return 12.0
 
-    if key in ["late_hum_vs_early"]:
+    if key == "late_hum_vs_early":
         return 6.0
 
     if key in ["hum_avg", "hum_max", "hum_now", "hum_end"]:
-        return 2.0
+        return 1.8
 
-    # 가스 변화율
-    if key in ["gas_drop_pct", "gas_now_pct", "gas_end_vs_start_pct", "late_vs_early_pct"]:
+    # 가스 변화율 핵심
+    if key in ["gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct", "late_vs_early_pct"]:
         return 6.0
 
-    if key in ["gas_slope"]:
+    if key == "gas_slope":
         return 0.006
 
-    # gas 절대값은 환경 영향 있으므로 낮게
-    if key in ["gas_avg", "gas_min", "gas_max", "gas_now", "gas_end", "early_gas_avg", "late_gas_avg"]:
-        return 0.0015
+    # gas 절대값은 환경 영향이 있어서 낮게
+    if key in ["gas_now", "gas_avg", "gas_min", "gas_max", "gas_end"]:
+        return 0.0012
 
     # 패턴
-    if key in ["gas_smooth_score"]:
+    if key == "gas_smooth_score":
         return 180.0
 
-    if key in ["gas_slope_stdev"]:
+    if key == "gas_slope_stdev":
         return 0.004
 
-    if key in ["gas_direction_changes"]:
+    if key == "gas_direction_changes":
         return 0.15
 
     # 환경
-    if key in ["temp_avg"]:
+    if key == "temp_avg":
         return 0.2
 
-    if key in ["press_avg"]:
+    if key == "press_avg":
         return 0.03
 
     return 0.001
 
 
-def time_weight(current_elapsed, sample_elapsed):
-    diff = abs(current_elapsed - sample_elapsed)
+def time_weight(current_duration, sample_duration):
+    diff = abs(current_duration - sample_duration)
 
     if diff <= 0.5:
         return 1.6
@@ -735,16 +743,16 @@ def classify_ipa_ethanol(feature):
     if not usable:
         return {"IPA": 0.0, "ETHANOL": 0.0}, "학습 데이터 없음"
 
-    cur_elapsed = to_float(feature.get("elapsed_sec", 0))
+    cur_duration = to_float(feature.get("duration_sec", 0))
 
     for s in usable:
         label = s.get("label")
-
         d = feature_distance(feature, s)
+
         w = 1.0 / (1.0 + d)
 
-        sample_elapsed = to_float(s.get("elapsed_sec", 0))
-        w *= time_weight(cur_elapsed, sample_elapsed)
+        sample_duration = to_float(s.get("duration_sec", 0))
+        w *= time_weight(cur_duration, sample_duration)
 
         scores[label] += w
 
@@ -769,23 +777,12 @@ def classify_ipa_ethanol(feature):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("BME688 실시간 IPA / 에탄올 판별")
+        self.root.title("BME688 LIVE IPA / 에탄올 판별")
         self.root.attributes("-fullscreen", True)
         self.fullscreen = True
 
         self.running = True
         self.sensor_ready = False
-
-        # 실시간 상태
-        self.realtime_detect = REALTIME_DEFAULT_ON
-        self.live_state = "WATCH"
-        self.trigger_count = 0
-        self.trigger_time = None
-        self.trigger_gas = None
-        self.trigger_hum = None
-        self.event_rows = []
-        self.last_pct = {"IPA": 0.0, "ETHANOL": 0.0}
-        self.last_winner = "-"
 
         # 메모리 AIR 기준
         air = load_air_memory()
@@ -798,8 +795,15 @@ class App:
             self.mem_air_hum = None
             self.mem_air_temp = None
 
-        # 데이터
-        self.current_rows = deque(maxlen=1500)
+        # 실시간 데이터
+        self.current_rows = deque(maxlen=2000)
+        self.rolling_rows = deque(maxlen=300)
+
+        # 판별 상태는 따로 없음. 항상 LIVE.
+        self.live_enabled = True
+        self.last_pct = {"IPA": 0.0, "ETHANOL": 0.0}
+        self.last_winner = "-"
+        self.last_state_text = "시작중"
 
         # 학습 상태
         self.train_mode = None
@@ -871,8 +875,7 @@ class App:
             ("AIR기준저장", self.save_current_air_memory),
             ("에탄올학습", lambda: self.start_train("ETHANOL")),
             ("IPA학습", lambda: self.start_train("IPA")),
-            ("실시간ON/OFF", self.toggle_realtime),
-            ("리셋", self.reset_live),
+            ("LIVE ON/OFF", self.toggle_live),
         ]
 
         for txt, cmd in buttons:
@@ -940,52 +943,39 @@ class App:
             spine.set_color("#314452")
 
     # ------------------------------------------------------------
-    # 상태
+    # 상태 / 버튼
     # ------------------------------------------------------------
 
     def update_status(self, msg=None):
         counts = count_labels()
-        rt = "ON" if self.realtime_detect else "OFF"
+        live = "ON" if self.live_enabled else "OFF"
 
         air_txt = "없음"
         if self.mem_air_gas and self.mem_air_hum is not None:
             air_txt = f"{self.mem_air_gas:,.0f}Ω / {self.mem_air_hum:.1f}%"
 
-        state = msg if msg else self.live_state
+        state = msg if msg else self.last_state_text
 
         self.status_main.config(text=f"상태: {state}")
         self.status_sub.config(
-            text=f"실시간 {rt} | AIR기준 {air_txt} | IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | "
-                 f"측정 {MEASURE_SLEEP_SEC:.2f}s | trigger gas {TRIGGER_GAS_DROP_PCT}% / hum +{TRIGGER_HUM_RISE}%p"
+            text=f"LIVE {live} | AIR기준 {air_txt} | IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | "
+                 f"측정 {MEASURE_SLEEP_SEC:.2f}s | Rolling {ROLLING_WINDOW_SEC:.0f}s"
         )
 
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
         self.root.attributes("-fullscreen", self.fullscreen)
 
-    def toggle_realtime(self):
-        self.realtime_detect = not self.realtime_detect
-        self.reset_live()
-        self.update_status("실시간 ON" if self.realtime_detect else "실시간 OFF")
-
-    def reset_live(self):
-        self.live_state = "WATCH"
-        self.trigger_count = 0
-        self.trigger_time = None
-        self.trigger_gas = None
-        self.trigger_hum = None
-        self.event_rows = []
-        self.last_pct = {"IPA": 0.0, "ETHANOL": 0.0}
-        self.last_winner = "-"
-
-        self.cards["현재상태"].config(text="실시간 감시중", fg=self.blue)
-        self.cards["Gas변화"].config(text="-")
-        self.cards["습도변화"].config(text="-")
+    def toggle_live(self):
+        self.live_enabled = not self.live_enabled
+        self.rolling_rows.clear()
         self.cards["IPA"].config(text="-")
         self.cards["에탄올"].config(text="-")
+        self.cards["현재상태"].config(text="LIVE ON" if self.live_enabled else "LIVE OFF", fg=self.blue)
+        self.update_status("LIVE ON" if self.live_enabled else "LIVE OFF")
 
     def save_current_air_memory(self):
-        rows = [r for r in list(self.current_rows)[-30:] if r.get("recordable") and r.get("gas_ohm", 0) > 0]
+        rows = [r for r in list(self.current_rows)[-40:] if r.get("recordable") and r.get("gas_ohm", 0) > 0]
 
         if len(rows) < 5:
             messagebox.showinfo("안내", "AIR 기준으로 저장할 유효 데이터가 부족합니다.")
@@ -1013,8 +1003,8 @@ class App:
             messagebox.showinfo("안내", "이미 학습 중입니다.")
             return
 
-        self.realtime_detect = False
-        self.reset_live()
+        self.live_enabled = False
+        self.rolling_rows.clear()
 
         self.train_mode = "TRAIN"
         self.train_label = label
@@ -1047,7 +1037,7 @@ class App:
             self.last_train_feature_time = 0
             self.train_saved_count = 0
 
-            self.cards["현재상태"].config(text=f"{label_korean(self.train_label)} 주입 / 실시간 학습중", fg=self.orange)
+            self.cards["현재상태"].config(text=f"{label_korean(self.train_label)} 주입 / 학습중", fg=self.orange)
             return
 
         if self.train_phase == "RECORD":
@@ -1055,6 +1045,7 @@ class App:
                 self.train_rows.append(row)
 
             remain = int(self.train_record_until - now)
+
             self.cards["현재상태"].config(
                 text=f"{label_korean(self.train_label)} 학습중 {remain}초 / 저장 {self.train_saved_count}",
                 fg=self.orange,
@@ -1066,13 +1057,14 @@ class App:
                 elapsed = clean[-1]["epoch"] - clean[0]["epoch"]
 
                 if elapsed - self.last_train_feature_time >= TRAIN_FEATURE_INTERVAL_SEC:
-                    trigger_gas = clean[0]["gas_ohm"]
-                    trigger_hum = clean[0]["hum_pct"]
+                    # 학습은 현재 저장된 AIR 기준을 기준으로 저장
+                    air_gas = self.mem_air_gas if self.mem_air_gas else clean[0]["gas_ohm"]
+                    air_hum = self.mem_air_hum if self.mem_air_hum is not None else clean[0]["hum_pct"]
 
-                    feature = extract_feature(clean, trigger_gas, trigger_hum, label=self.train_label)
+                    feature = extract_live_feature(clean, air_gas, air_hum, label=self.train_label)
 
                     if feature:
-                        feature["train_type"] = "REALTIME_200MS"
+                        feature["train_type"] = "LIVE_ROLLING_200MS"
                         save_dict_csv(SAMPLES_CSV, feature)
                         self.train_saved_count += 1
                         self.last_train_feature_time = elapsed
@@ -1081,26 +1073,27 @@ class App:
                 self.finish_train()
 
     def finish_train(self):
-        self.train_mode = None
         label = self.train_label
         saved = self.train_saved_count
 
+        self.train_mode = None
         self.train_label = None
         self.train_rows = []
         self.train_phase = None
 
-        self.realtime_detect = True
-        self.reset_live()
+        self.live_enabled = True
+        self.rolling_rows.clear()
 
         messagebox.showinfo("학습 완료", f"{label_korean(label)} 학습 완료\n누적 feature {saved}개 저장")
-        self.update_status("학습 완료 / 실시간 재시작")
+        self.cards["현재상태"].config(text="LIVE 재시작", fg=self.blue)
+        self.update_status("학습 완료 / LIVE 재시작")
 
     # ------------------------------------------------------------
-    # 실시간 판별 핵심
+    # 최종 LIVE 판별
     # ------------------------------------------------------------
 
-    def process_realtime(self, row):
-        if not self.realtime_detect:
+    def process_live(self, row):
+        if not self.live_enabled:
             return
 
         if self.train_mode:
@@ -1109,86 +1102,91 @@ class App:
         if not row.get("recordable"):
             return
 
-        # AIR 기준 없으면 현재값으로 임시 기준 생성
+        # AIR 기준 없으면 현재값을 임시 기준으로 바로 사용
         if self.mem_air_gas is None or self.mem_air_gas <= 0:
             self.mem_air_gas = row["gas_ohm"]
             self.mem_air_hum = row["hum_pct"]
             self.mem_air_temp = row["temp_c"]
             save_air_memory(self.mem_air_gas, self.mem_air_hum, self.mem_air_temp)
 
-        # --------------------------------------------------------
-        # 평상시 감시
-        # --------------------------------------------------------
-        if self.live_state == "WATCH":
-            air_gas = self.mem_air_gas
-            air_hum = self.mem_air_hum
+        air_gas = self.mem_air_gas
+        air_hum = self.mem_air_hum
 
-            gas_drop_pct = ((row["gas_ohm"] - air_gas) / air_gas) * 100.0 if air_gas else 0.0
-            hum_rise = row["hum_pct"] - air_hum if air_hum is not None else 0.0
+        gas_delta_pct = ((row["gas_ohm"] - air_gas) / air_gas) * 100.0 if air_gas else 0.0
+        hum_delta = row["hum_pct"] - air_hum if air_hum is not None else 0.0
 
-            self.cards["현재상태"].config(text="실시간 감시중", fg=self.blue)
-            self.cards["Gas변화"].config(text=f"{gas_drop_pct:+.1f}%")
-            self.cards["습도변화"].config(text=f"{hum_rise:+.2f}%p")
+        self.cards["Gas변화"].config(text=f"{gas_delta_pct:+.1f}%")
+        self.cards["습도변화"].config(text=f"{hum_delta:+.2f}%p")
 
-            changed = gas_drop_pct <= TRIGGER_GAS_DROP_PCT or hum_rise >= TRIGGER_HUM_RISE
+        # rolling 데이터 유지
+        self.rolling_rows.append(row)
 
-            if changed:
-                self.trigger_count += 1
-            else:
-                self.trigger_count = 0
+        now = row["epoch"]
+        while self.rolling_rows and now - self.rolling_rows[0]["epoch"] > ROLLING_WINDOW_SEC:
+            self.rolling_rows.popleft()
 
-                # 변화 없을 때만 AIR 기준 천천히 보정
-                self.mem_air_gas = (self.mem_air_gas * (1.0 - AIR_SLOW_ALPHA)) + (row["gas_ohm"] * AIR_SLOW_ALPHA)
-                self.mem_air_hum = (self.mem_air_hum * (1.0 - AIR_SLOW_ALPHA)) + (row["hum_pct"] * AIR_SLOW_ALPHA)
-                self.mem_air_temp = (self.mem_air_temp * (1.0 - AIR_SLOW_ALPHA)) + (row["temp_c"] * AIR_SLOW_ALPHA)
+        # 변화가 작은 경우: 정상범위 + AIR 기준 천천히 보정
+        is_stable_air = (
+            abs(gas_delta_pct) <= AIR_STABLE_GAS_PCT
+            and abs(hum_delta) <= AIR_STABLE_HUM_DELTA
+        )
 
-            if self.trigger_count >= TRIGGER_CONFIRM_COUNT:
-                self.live_state = "DETECT"
-                self.trigger_time = row["epoch"]
-                self.trigger_gas = self.mem_air_gas
-                self.trigger_hum = self.mem_air_hum
-                self.event_rows = [row]
+        is_active = (
+            gas_delta_pct <= ACTIVE_GAS_DROP_PCT
+            or hum_delta >= ACTIVE_HUM_RISE
+        )
 
-                self.cards["현재상태"].config(text="가스 변화 감지 t=0", fg=self.orange)
-                return
+        if is_stable_air:
+            self.mem_air_gas = (self.mem_air_gas * (1.0 - AIR_SLOW_ALPHA)) + (row["gas_ohm"] * AIR_SLOW_ALPHA)
+            self.mem_air_hum = (self.mem_air_hum * (1.0 - AIR_SLOW_ALPHA)) + (row["hum_pct"] * AIR_SLOW_ALPHA)
+            self.mem_air_temp = (self.mem_air_temp * (1.0 - AIR_SLOW_ALPHA)) + (row["temp_c"] * AIR_SLOW_ALPHA)
 
-        # --------------------------------------------------------
-        # 감지 후 매 측정마다 계속 판별
-        # --------------------------------------------------------
-        elif self.live_state == "DETECT":
-            self.event_rows.append(row)
+        if not is_active:
+            self.last_state_text = "정상범위"
+            self.cards["현재상태"].config(text="정상범위", fg=self.blue)
+            self.cards["IPA"].config(text="-")
+            self.cards["에탄올"].config(text="-")
+            return
 
-            elapsed = row["epoch"] - self.trigger_time
+        clean = clean_rows(self.rolling_rows)
 
-            gas_delta_pct = ((row["gas_ohm"] - self.trigger_gas) / self.trigger_gas) * 100.0 if self.trigger_gas else 0.0
-            hum_delta = row["hum_pct"] - self.trigger_hum if self.trigger_hum is not None else 0.0
+        if len(clean) < MIN_CLASSIFY_ROWS:
+            self.last_state_text = "반응 감지 / 데이터 부족"
+            self.cards["현재상태"].config(text="반응 감지 / 데이터 부족", fg=self.orange)
+            return
 
-            self.cards["Gas변화"].config(text=f"{gas_delta_pct:+.1f}%")
-            self.cards["습도변화"].config(text=f"{hum_delta:+.2f}%p")
+        duration = clean[-1]["epoch"] - clean[0]["epoch"]
 
-            if elapsed >= MIN_REALTIME_SEC:
-                feature = extract_feature(self.event_rows, self.trigger_gas, self.trigger_hum, label="REALTIME")
+        if duration < MIN_CLASSIFY_SEC:
+            self.last_state_text = f"반응 감지 / {duration:.1f}초"
+            self.cards["현재상태"].config(text=f"반응 감지 / {duration:.1f}초", fg=self.orange)
+            return
 
-                if feature:
-                    pct, winner = classify_ipa_ethanol(feature)
-                    self.last_pct = pct
-                    self.last_winner = winner
+        feature = extract_live_feature(clean, self.mem_air_gas, self.mem_air_hum, label="LIVE")
 
-                    self.cards["IPA"].config(text=f"{pct['IPA']:.1f}%")
-                    self.cards["에탄올"].config(text=f"{pct['ETHANOL']:.1f}%")
+        if not feature:
+            self.last_state_text = "판별 feature 부족"
+            self.cards["현재상태"].config(text="판별 feature 부족", fg=self.orange)
+            return
 
-                    color = self.yellow if winner == "IPA" else self.green
-                    self.cards["현재상태"].config(
-                        text=f"실시간 {elapsed:.1f}초 / {label_korean(winner)} {pct.get(winner, 0):.1f}%",
-                        fg=color,
-                    )
-            else:
-                self.cards["현재상태"].config(text=f"반응 감지 / {elapsed:.1f}초", fg=self.orange)
+        pct, winner = classify_ipa_ethanol(feature)
 
-            # 30초 넘으면 바로 다시 감시 복귀
-            if elapsed >= MAX_EVENT_SEC:
-                self.reset_live()
-                self.cards["현재상태"].config(text="실시간 감시 복귀", fg=self.blue)
+        if winner in ["학습 데이터 없음", "판별 불가"]:
+            self.last_state_text = winner
+            self.cards["현재상태"].config(text=winner, fg=self.red)
+            self.cards["IPA"].config(text="-")
+            self.cards["에탄올"].config(text="-")
+            return
+
+        self.last_pct = pct
+        self.last_winner = winner
+
+        self.cards["IPA"].config(text=f"{pct['IPA']:.1f}%")
+        self.cards["에탄올"].config(text=f"{pct['ETHANOL']:.1f}%")
+
+        color = self.yellow if winner == "IPA" else self.green
+        self.last_state_text = f"{label_korean(winner)} {pct[winner]:.1f}%"
+        self.cards["현재상태"].config(text=self.last_state_text, fg=color)
 
     # ------------------------------------------------------------
     # 데이터 관리
@@ -1209,9 +1207,9 @@ class App:
         ).pack(pady=8)
 
         columns = (
-            "id", "timestamp", "label", "elapsed_sec", "count",
-            "gas_drop_pct", "gas_now_pct", "gas_end_vs_start_pct",
-            "hum_rise_abs", "hum_now_delta", "hum_rise_speed",
+            "id", "timestamp", "label", "duration_sec", "count",
+            "gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct",
+            "hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_rise_speed",
             "gas_avg", "gas_min", "hum_avg", "hum_max"
         )
 
@@ -1227,7 +1225,7 @@ class App:
 
         for c in columns:
             tree.heading(c, text=c)
-            tree.column(c, width=105, anchor="center")
+            tree.column(c, width=102, anchor="center")
 
         def fmt(v):
             try:
@@ -1311,7 +1309,7 @@ class App:
                 if self.train_mode:
                     self.process_train(row)
                 else:
-                    self.process_realtime(row)
+                    self.process_live(row)
 
                 self.cards["가스저항"].config(text=f"{row['gas_ohm']:,.0f} Ω")
                 self.update_status()
@@ -1335,49 +1333,54 @@ class App:
             self.style_axis(self.ax_gas)
             self.style_axis(self.ax_hum)
 
-            if self.live_state == "DETECT" and self.trigger_time and self.trigger_gas:
-                plot_rows = [r for r in rows if r["epoch"] >= self.trigger_time - 0.5]
+            now = time.time()
+            plot_rows = [r for r in rows if now - r["epoch"] <= ROLLING_WINDOW_SEC]
 
-                xs = [r["epoch"] - self.trigger_time for r in plot_rows]
-                gas_pct = [((r["gas_ohm"] - self.trigger_gas) / self.trigger_gas) * 100.0 for r in plot_rows]
-                hum_delta = [r["hum_pct"] - self.trigger_hum for r in plot_rows]
+            if plot_rows and self.mem_air_gas and self.mem_air_hum is not None:
+                t0 = plot_rows[0]["epoch"]
+                xs = [r["epoch"] - t0 for r in plot_rows]
+
+                gas_pct = [
+                    ((r["gas_ohm"] - self.mem_air_gas) / self.mem_air_gas) * 100.0
+                    for r in plot_rows
+                ]
+                hum_delta = [
+                    r["hum_pct"] - self.mem_air_hum
+                    for r in plot_rows
+                ]
 
                 self.ax_gas.plot(xs, gas_pct, linewidth=2.5)
-                self.ax_gas.axvline(0, linestyle="--", linewidth=1.2)
                 self.ax_gas.axhline(0, linestyle="--", linewidth=1.0)
-                self.ax_gas.set_title("Trigger 기준 Gas 변화율")
-                self.ax_gas.set_xlabel("시간 (초)")
+                self.ax_gas.axhline(ACTIVE_GAS_DROP_PCT, linestyle="--", linewidth=1.0)
+                self.ax_gas.set_title("AIR 기준 Gas 변화율")
+                self.ax_gas.set_xlabel("최근 시간 (초)")
                 self.ax_gas.set_ylabel("Gas 변화율 (%)")
 
                 self.ax_hum.plot(xs, hum_delta, linewidth=2.5)
-                self.ax_hum.axvline(0, linestyle="--", linewidth=1.2)
                 self.ax_hum.axhline(0, linestyle="--", linewidth=1.0)
-                self.ax_hum.set_title("Trigger 기준 습도 변화량")
-                self.ax_hum.set_xlabel("시간 (초)")
+                self.ax_hum.axhline(ACTIVE_HUM_RISE, linestyle="--", linewidth=1.0)
+                self.ax_hum.set_title("AIR 기준 습도 변화량")
+                self.ax_hum.set_xlabel("최근 시간 (초)")
                 self.ax_hum.set_ylabel("습도 변화량 (%p)")
 
             else:
-                now = time.time()
-                plot_rows = [r for r in rows if now - r["epoch"] <= 30]
+                t0 = rows[0]["epoch"]
+                xs = [r["epoch"] - t0 for r in rows[-100:]]
+                gas = [r["gas_ohm"] for r in rows[-100:]]
+                hum = [r["hum_pct"] for r in rows[-100:]]
 
-                if plot_rows:
-                    t0 = plot_rows[0]["epoch"]
-                    xs = [r["epoch"] - t0 for r in plot_rows]
-                    gas = [r["gas_ohm"] for r in plot_rows]
-                    hum = [r["hum_pct"] for r in plot_rows]
+                self.ax_gas.plot(xs, gas, linewidth=2.0)
+                self.ax_gas.set_title("Gas 원본")
+                self.ax_gas.set_xlabel("시간 (초)")
+                self.ax_gas.set_ylabel("Gas 저항 (Ω)")
 
-                    self.ax_gas.plot(xs, gas, linewidth=2.0)
-                    self.ax_gas.set_title("최근 30초 Gas 원본")
-                    self.ax_gas.set_xlabel("시간 (초)")
-                    self.ax_gas.set_ylabel("Gas 저항 (Ω)")
-
-                    self.ax_hum.plot(xs, hum, linewidth=2.0)
-                    self.ax_hum.set_title("최근 30초 습도")
-                    self.ax_hum.set_xlabel("시간 (초)")
-                    self.ax_hum.set_ylabel("습도 (%)")
+                self.ax_hum.plot(xs, hum, linewidth=2.0)
+                self.ax_hum.set_title("습도 원본")
+                self.ax_hum.set_xlabel("시간 (초)")
+                self.ax_hum.set_ylabel("습도 (%)")
 
             self.fig.suptitle(
-                "BME688 200ms 실시간 IPA / 에탄올 판별",
+                "BME688 LIVE Rolling IPA / 에탄올 판별",
                 color=self.text,
                 fontsize=15,
                 fontweight="bold",
