@@ -65,10 +65,11 @@ RETURN_GAS_PCT = 6.0
 RETURN_HUM_DELTA = 2.0
 NORMAL_RETURN_COUNT = 3
 
-TRAIN_READY_SEC = 3
-TRAIN_RECORD_SEC = 30
-TRAIN_FEATURE_INTERVAL_SEC = 0.5
-MIN_TRAIN_ROWS = 10
+TRAIN_READY_SEC = 3.0
+TRAIN_RECORD_SEC = 10.0
+TRAIN_CURVE_STEP_SEC = 0.2
+TRAIN_FEATURE_INTERVAL_SEC = 999.0
+MIN_TRAIN_ROWS = 20
 
 FONT_PATHS = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
@@ -735,7 +736,16 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
 
     shape = calc_shape(rows)
 
+    curve_features = {}
+    steps = int(round(TRAIN_RECORD_SEC / TRAIN_CURVE_STEP_SEC))
+    for i in range(steps + 1):
+        sec = round(i * TRAIN_CURVE_STEP_SEC, 1)
+        key_sec = f"{sec:.1f}".replace(".", "p")
+        curve_features[f"gas_curve_{key_sec}s"] = gas_drop_at(sec)
+        curve_features[f"hum_curve_{key_sec}s"] = hum_rise_at(sec)
+
     return {
+        **curve_features,
         "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3],
         "timestamp": datetime.now().isoformat(timespec="milliseconds"),
         "label": label,
@@ -843,6 +853,10 @@ def numeric_keys(row):
 
 
 def key_scale(key):
+    if key.startswith("gas_curve_"):
+        return 8.5
+    if key.startswith("hum_curve_"):
+        return 7.5
     if key in ["hum_gas_ratio", "hum_gas_ratio_2s", "hum_gas_ratio_5s", "hum_gas_ratio_8s", "hum_gas_ratio_10s"]:
         return 9.0
     if key in ["late_gas_per_hum", "late_gas_per_hum_6_8", "late10_gas_per_hum", "late10_extra_gas_per_hum"]:
@@ -1437,6 +1451,9 @@ class App:
         self.train_phase = None
         self.last_train_feature_time = 0
         self.train_saved_count = 0
+        self.train_start_air_gas = None
+        self.train_start_air_hum = None
+        self.train_start_air_temp = None
 
         self.last_reaction_time = 0
         self.last_air_history_time = 0
@@ -1728,7 +1745,12 @@ class App:
             messagebox.showinfo("안내", "이미 학습 중입니다.")
             return
 
-        if not self.mem_air_gas:
+        recent_air = [
+            r for r in list(self.current_rows)[-30:]
+            if r.get("recordable") and r.get("gas_ohm", 0) > 0
+        ]
+
+        if len(recent_air) < 5 and not self.mem_air_gas:
             messagebox.showinfo("안내", "먼저 깨끗한 공기 상태에서 AIR기준저장을 눌러주세요.")
             return
 
@@ -1742,9 +1764,45 @@ class App:
         self.train_record_until = 0
         self.last_train_feature_time = 0
         self.train_saved_count = 0
+        self.train_start_air_gas = None
+        self.train_start_air_hum = None
+        self.train_start_air_temp = None
+        self.last_reaction_time = time.time()
 
-        self.cards["현재상태"].config(text=f"{label_detail_korean(label)} 학습 준비", fg=self.yellow)
-        self.update_status(f"{label_detail_korean(label)} 학습 준비")
+        self.cards["현재상태"].config(text=f"{label_detail_korean(label)} 학습대기 {TRAIN_READY_SEC:.0f}s", fg=self.yellow)
+        self.cards["IPA"].config(text="-")
+        self.cards["에탄올"].config(text="-")
+        self.update_status(f"{label_detail_korean(label)} 학습 대기 / {TRAIN_READY_SEC:.0f}초 뒤 0.2초 간격 기록")
+
+    def begin_train_record(self):
+        recent_air = [
+            r for r in list(self.current_rows)[-20:]
+            if r.get("recordable") and r.get("gas_ohm", 0) > 0
+        ]
+
+        if len(recent_air) >= 5:
+            self.train_start_air_gas = median([r["gas_ohm"] for r in recent_air[-10:]])
+            self.train_start_air_hum = median([r["hum_pct"] for r in recent_air[-10:]])
+            self.train_start_air_temp = median([r["temp_c"] for r in recent_air[-10:]])
+        elif self.mem_air_gas:
+            self.train_start_air_gas = self.mem_air_gas
+            self.train_start_air_hum = self.mem_air_hum
+            self.train_start_air_temp = self.mem_air_temp
+        else:
+            self.train_mode = None
+            self.train_label = None
+            self.train_phase = None
+            self.update_status("학습 실패 / AIR 기준 없음")
+            messagebox.showinfo("안내", "먼저 깨끗한 공기 상태에서 AIR기준저장을 눌러주세요.")
+            return
+
+        self.train_rows = []
+        self.train_phase = "RECORD"
+        self.train_record_until = time.time() + TRAIN_RECORD_SEC
+        self.last_train_feature_time = 0
+        self.train_saved_count = 0
+        self.cards["현재상태"].config(text=f"{label_detail_korean(self.train_label)} 기록시작", fg=self.orange)
+        self.update_status(f"{label_detail_korean(self.train_label)} 기록 시작 / {TRAIN_CURVE_STEP_SEC:.1f}초 간격 / {TRAIN_RECORD_SEC:.0f}초")
 
     def process_train(self, row):
         if not self.train_mode:
@@ -1753,78 +1811,75 @@ class App:
         now = time.time()
 
         if self.train_phase == "READY":
-            remain = int(self.train_ready_until - now)
-
-            if remain > 0:
-                self.safe_ui(
-                    self.cards["현재상태"].config,
-                    text=f"{label_detail_korean(self.train_label)} 학습 준비 {remain}초",
-                    fg=self.yellow,
-                )
-                return
-
-            self.train_phase = "RECORD"
-            self.train_record_until = now + TRAIN_RECORD_SEC
-            self.train_rows = []
-            self.last_train_feature_time = 0
-            self.train_saved_count = 0
-            self.last_reaction_time = now
-
+            remain = max(0.0, self.train_ready_until - now)
             self.safe_ui(
                 self.cards["현재상태"].config,
-                text=f"{label_detail_korean(self.train_label)} 주입 / 학습중",
-                fg=self.orange,
+                text=f"{label_detail_korean(self.train_label)} 학습대기 {remain:.1f}s",
+                fg=self.yellow,
             )
+            if remain <= 0:
+                self.safe_ui(self.begin_train_record)
             return
 
-        if self.train_phase == "RECORD":
-            if row.get("recordable"):
-                self.train_rows.append(row)
+        if self.train_phase != "RECORD":
+            return
 
-            remain = int(self.train_record_until - now)
+        if row.get("recordable"):
+            self.train_rows.append(row)
 
-            self.safe_ui(
-                self.cards["현재상태"].config,
-                text=f"{label_detail_korean(self.train_label)} 학습중 {remain}초 / 저장 {self.train_saved_count}",
-                fg=self.orange,
-            )
+        remain_float = max(0.0, self.train_record_until - now)
+        elapsed_float = max(0.0, TRAIN_RECORD_SEC - remain_float)
 
-            clean = clean_rows(self.train_rows)
+        self.safe_ui(
+            self.cards["현재상태"].config,
+            text=f"{label_detail_korean(self.train_label)} 기록중 {elapsed_float:.1f}/{TRAIN_RECORD_SEC:.1f}s ({len(self.train_rows)}개)",
+            fg=self.orange,
+        )
 
-            if len(clean) >= MIN_TRAIN_ROWS:
-                elapsed = clean[-1]["epoch"] - clean[0]["epoch"]
-
-                if elapsed - self.last_train_feature_time >= TRAIN_FEATURE_INTERVAL_SEC:
-                    feature = extract_live_feature(
-                        clean,
-                        self.mem_air_gas,
-                        self.mem_air_hum,
-                        label=self.train_label,
-                    )
-
-                    if feature:
-                        feature["train_type"] = "GROUPED_INTERNAL_LABEL"
-                        save_dict_csv(SAMPLES_CSV, feature)
-                        self.train_saved_count += 1
-                        self.last_train_feature_time = elapsed
-
-            if remain <= 0:
-                self.safe_ui(self.finish_train)
+        if remain_float <= 0:
+            self.safe_ui(self.finish_train)
 
     def finish_train(self):
         label = self.train_label
-        saved = self.train_saved_count
+        clean = clean_rows(self.train_rows)
+        saved = 0
+
+        if len(clean) >= MIN_TRAIN_ROWS:
+            feature = extract_live_feature(
+                clean,
+                self.train_start_air_gas,
+                self.train_start_air_hum,
+                label=label,
+            )
+
+            if feature:
+                feature["train_type"] = "ONE_SHOT_3SEC_READY_0P2SEC_CURVE_10SEC"
+                feature["train_ref_gas"] = self.train_start_air_gas
+                feature["train_ref_hum"] = self.train_start_air_hum
+                feature["train_ref_temp"] = self.train_start_air_temp
+                save_dict_csv(SAMPLES_CSV, feature)
+                saved = 1
 
         self.train_mode = None
         self.train_label = None
         self.train_rows = []
         self.train_phase = None
+        self.train_record_until = 0
+        self.last_train_feature_time = 0
+        self.train_saved_count = saved
+        self.train_start_air_gas = None
+        self.train_start_air_hum = None
+        self.train_start_air_temp = None
 
         self.reset_live_state()
 
-        messagebox.showinfo("학습 완료", f"{label_detail_korean(label)} 학습 완료\n누적 feature {saved}개 저장")
-        self.cards["현재상태"].config(text="LIVE 재시작", fg=self.blue)
-        self.update_status("학습 완료 / LIVE 재시작")
+        if saved:
+            messagebox.showinfo("학습 완료", f"{label_detail_korean(label)} 학습 완료\n3초 대기 후 0초부터 {TRAIN_RECORD_SEC:.0f}초까지 0.2초 곡선 1개 저장")
+            self.cards["현재상태"].config(text="LIVE 재시작", fg=self.blue)
+            self.update_status("학습 완료 / LIVE 재시작")
+        else:
+            messagebox.showwarning("학습 실패", "유효 데이터가 부족해서 저장하지 못했습니다.")
+            self.update_status("학습 실패 / 데이터 부족")
 
     def process_live(self, row):
         if self.train_mode:
@@ -2002,7 +2057,7 @@ class App:
     def show_data_manager(self):
         win = tk.Toplevel(self.root)
         win.title("데이터 관리")
-        win.geometry("1520x760")
+        win.geometry("1580x820")
         win.configure(bg=self.bg)
 
         tk.Label(
@@ -2014,27 +2069,48 @@ class App:
         ).pack(pady=8)
 
         columns = (
-            "id", "timestamp", "label", "group", "duration_sec", "count",
+            "check", "id", "timestamp", "label", "group", "train_type", "duration_sec", "count",
             "gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct",
-            "hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_rise_speed", "hum_gas_ratio",
-            "gas_slope", "gas_drop_2s", "gas_drop_4s", "gas_drop_8s",
-            "gas_speed_0_2s", "hum_rise_2s", "hum_rise_4s", "hum_rise_8s",
-            "hum_gas_ratio", "hum_gas_ratio_8s", "gas_smooth_score", "temp_avg", "press_avg"
+            "hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_end_delta",
+            "gas_drop_2s", "gas_drop_4s", "gas_drop_8s", "gas_drop_10s",
+            "gas_speed_5_8s", "gas_speed_8_10s", "gas_extra_drop_8_10s",
+            "late10_gas_per_hum", "temp_avg", "press_avg"
         )
+
+        topbar = tk.Frame(win, bg=self.bg)
+        topbar.pack(fill="x", padx=10, pady=4)
+
+        tk.Label(topbar, text="라벨별 삭제:", bg=self.bg, fg=self.text, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+
+        label_names = [txt for txt, _ in TRAIN_BUTTONS]
+        label_values = [lab for _, lab in TRAIN_BUTTONS]
+        label_display_to_value = {txt: lab for txt, lab in TRAIN_BUTTONS}
+        label_combo = ttk.Combobox(topbar, values=label_names, state="readonly", width=18)
+        label_combo.pack(side="left", padx=4)
+        if label_names:
+            label_combo.current(0)
 
         frame = tk.Frame(win, bg=self.bg)
         frame.pack(fill="both", expand=True, padx=10, pady=8)
 
-        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         tree.pack(side="left", fill="both", expand=True)
 
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        scroll.pack(side="right", fill="y")
-        tree.configure(yscrollcommand=scroll.set)
+        scroll_y = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scroll_y.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=scroll_y.set)
+
+        scroll_x = ttk.Scrollbar(win, orient="horizontal", command=tree.xview)
+        scroll_x.pack(fill="x", padx=10)
+        tree.configure(xscrollcommand=scroll_x.set)
+
+        checked = set()
+        table_rows = []
 
         for c in columns:
             tree.heading(c, text=c)
-            tree.column(c, width=105, anchor="center")
+            width = 70 if c == "check" else 112
+            tree.column(c, width=width, anchor="center", stretch=False)
 
         def fmt(v):
             try:
@@ -2042,37 +2118,141 @@ class App:
             except Exception:
                 return v
 
+        def row_values(i, r):
+            rr = dict(r)
+            rr["group"] = label_group(rr.get("label", ""))
+            rr["check"] = "☑" if i in checked else "☐"
+            return [fmt(rr.get(c, "")) for c in columns]
+
         def load_table():
+            nonlocal table_rows
+            checked.clear()
             for item in tree.get_children():
                 tree.delete(item)
 
-            rows = load_csv(SAMPLES_CSV)
+            table_rows = load_csv(SAMPLES_CSV)
 
-            for i, r in enumerate(rows):
-                rr = dict(r)
-                rr["group"] = label_group(rr.get("label", ""))
-                values = [fmt(rr.get(c, "")) for c in columns]
-                tree.insert("", "end", iid=str(i), values=values)
+            for i, r in enumerate(table_rows):
+                tree.insert("", "end", iid=str(i), values=row_values(i, r))
 
-        def delete_selected():
+        def refresh_checks():
+            for item in tree.get_children():
+                idx = int(item)
+                if idx < len(table_rows):
+                    tree.item(item, values=row_values(idx, table_rows[idx]))
+
+        def toggle_item(item):
+            if not item:
+                return
+            idx = int(item)
+            if idx in checked:
+                checked.remove(idx)
+            else:
+                checked.add(idx)
+            refresh_checks()
+
+        def on_click(event):
+            region = tree.identify("region", event.x, event.y)
+            if region != "cell":
+                return
+            item = tree.identify_row(event.y)
+            col = tree.identify_column(event.x)
+            if col == "#1" and item:
+                toggle_item(item)
+
+        def toggle_selected():
             sel = tree.selection()
-
             if not sel:
                 return
+            for item in sel:
+                idx = int(item)
+                if idx in checked:
+                    checked.remove(idx)
+                else:
+                    checked.add(idx)
+            refresh_checks()
 
-            if not messagebox.askyesno("삭제", "선택 데이터를 삭제할까요?"):
+        def check_all_visible():
+            for item in tree.get_children():
+                checked.add(int(item))
+            refresh_checks()
+
+        def uncheck_all():
+            checked.clear()
+            refresh_checks()
+
+        def delete_checked():
+            if not checked:
+                messagebox.showinfo("안내", "체크된 데이터가 없습니다.")
+                return
+
+            if not messagebox.askyesno("체크 삭제", f"체크된 {len(checked)}개 데이터를 삭제할까요?"):
+                return
+
+            rows = load_csv(SAMPLES_CSV)
+            for idx in sorted(checked, reverse=True):
+                if 0 <= idx < len(rows):
+                    del rows[idx]
+
+            write_csv(SAMPLES_CSV, rows)
+            load_table()
+            self.update_status("체크 데이터 삭제 완료")
+
+        def delete_selected_rows():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("안내", "선택된 행이 없습니다.")
+                return
+
+            if not messagebox.askyesno("선택 삭제", f"선택된 {len(sel)}개 행을 삭제할까요?"):
                 return
 
             rows = load_csv(SAMPLES_CSV)
             idxs = sorted([int(x) for x in sel], reverse=True)
-
             for idx in idxs:
                 if 0 <= idx < len(rows):
                     del rows[idx]
 
             write_csv(SAMPLES_CSV, rows)
             load_table()
-            self.update_status("데이터 삭제 완료")
+            self.update_status("선택 행 삭제 완료")
+
+        def delete_label_rows():
+            display = label_combo.get()
+            label = label_display_to_value.get(display)
+            if not label:
+                return
+
+            rows = load_csv(SAMPLES_CSV)
+            matched = [r for r in rows if r.get("label") == label]
+
+            if not matched:
+                messagebox.showinfo("안내", f"{display} 데이터가 없습니다.")
+                return
+
+            if not messagebox.askyesno("라벨별 삭제", f"{display} 학습 데이터 {len(matched)}개를 삭제할까요?"):
+                return
+
+            rows = [r for r in rows if r.get("label") != label]
+            write_csv(SAMPLES_CSV, rows)
+            load_table()
+            self.update_status(f"{display} 데이터 삭제 완료")
+
+        def delete_group_rows(group_name, title):
+            rows = load_csv(SAMPLES_CSV)
+            matched = [r for r in rows if label_group(r.get("label", "")) == group_name]
+
+            if not matched:
+                messagebox.showinfo("안내", f"{title} 그룹 데이터가 없습니다.")
+                return
+
+            if not messagebox.askyesno("그룹 삭제", f"{title} 그룹 데이터 {len(matched)}개를 삭제할까요?"):
+                return
+
+            rows = [r for r in rows if label_group(r.get("label", "")) != group_name]
+            write_csv(SAMPLES_CSV, rows)
+            load_table()
+            self.update_status(f"{title} 그룹 데이터 삭제 완료")
 
         def clear_all():
             if not messagebox.askyesno("전체 삭제", "학습 데이터를 전부 삭제할까요?"):
@@ -2082,12 +2262,23 @@ class App:
             load_table()
             self.update_status("학습 데이터 전체 삭제")
 
+        tree.bind("<Button-1>", on_click)
+        tree.bind("<Double-1>", lambda e: toggle_item(tree.identify_row(e.y)))
+
         btns = tk.Frame(win, bg=self.bg)
         btns.pack(fill="x", padx=10, pady=8)
 
-        tk.Button(btns, text="새로고침", command=load_table, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
-        tk.Button(btns, text="선택삭제", command=delete_selected, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
-        tk.Button(btns, text="전체삭제", command=clear_all, font=("NanumGothic", 11, "bold")).pack(side="left", padx=5)
+        tk.Button(btns, text="새로고침", command=load_table, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+        tk.Button(btns, text="선택행 체크/해제", command=toggle_selected, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+        tk.Button(btns, text="전체체크", command=check_all_visible, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+        tk.Button(btns, text="체크해제", command=uncheck_all, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+        tk.Button(btns, text="체크삭제", command=delete_checked, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+        tk.Button(btns, text="선택행삭제", command=delete_selected_rows, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+
+        tk.Button(topbar, text="선택 라벨 삭제", command=delete_label_rows, font=("NanumGothic", 11, "bold")).pack(side="left", padx=6)
+        tk.Button(topbar, text="IPA 그룹 삭제", command=lambda: delete_group_rows("IPA", "IPA"), font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+        tk.Button(topbar, text="에탄올 그룹 삭제", command=lambda: delete_group_rows("ETHANOL", "에탄올"), font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
+        tk.Button(topbar, text="전체삭제", command=clear_all, font=("NanumGothic", 11, "bold")).pack(side="right", padx=4)
         tk.Button(btns, text="닫기", command=win.destroy, font=("NanumGothic", 11, "bold")).pack(side="right", padx=5)
 
         load_table()
