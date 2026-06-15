@@ -118,10 +118,22 @@ GROUP_LABELS = {
     "IPA_LOW": "IPA",
     "IPA_1000": "IPA",
     "IPA_10000": "IPA",
-    "IPA_WATER": "IPA",
+    "IPA_WATER": "IPA_WATER",
     "ETHANOL": "ETHANOL",
     "ETHANOL_HIGH": "ETHANOL",
     "ETHANOL_LOW": "ETHANOL",
+}
+
+
+VALID_CLASSIFY_LABELS = {
+    "IPA",
+    "IPA_HIGH",
+    "IPA_LOW",
+    "IPA_1000",
+    "IPA_10000",
+    "ETHANOL",
+    "ETHANOL_HIGH",
+    "ETHANOL_LOW",
 }
 
 TRAIN_BUTTONS = [
@@ -758,8 +770,8 @@ def classify_ipa_ethanol(feature):
     usable = []
 
     for s in samples:
-        g = label_group(s.get("label", ""))
-        if g in ["IPA", "ETHANOL"]:
+        label = s.get("label", "")
+        if label in VALID_CLASSIFY_LABELS:
             usable.append(s)
 
     scores = {"IPA": 0.0, "ETHANOL": 0.0}
@@ -778,8 +790,9 @@ def classify_ipa_ethanol(feature):
         sample_duration = to_float(s.get("duration_sec", 0))
         w *= time_weight(cur_duration, sample_duration)
 
-        scores[group] += w
-        detail_scores[label] = detail_scores.get(label, 0.0) + w
+        if group in scores:
+            scores[group] += w
+            detail_scores[label] = detail_scores.get(label, 0.0) + w
 
     total = scores["IPA"] + scores["ETHANOL"]
 
@@ -820,13 +833,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
         or hum_gas_ratio <= 0.42
     )
 
-    water_mixed_ipa_like = (
-        hum_max_delta >= 8.0
-        and hum_gas_ratio >= 0.65
-        and abs(gas_min_pct) <= 13.0
-        and gas_avg_pct > -8.0
-    )
-
     if ethanol_strong:
         eth += 10.0
 
@@ -835,10 +841,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
 
     if ipa_like:
         ipa += 6.0
-
-    if water_mixed_ipa_like and not ethanol_strong and eth < 55.0:
-        ipa += 4.0
-        eth -= 2.0
 
     ipa = max(0.0, ipa)
     eth = max(0.0, eth)
