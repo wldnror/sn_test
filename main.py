@@ -1097,28 +1097,30 @@ def adjust_for_water_mixed_ipa(feature, pct):
 
     ipa_water_late_shape = (
         hum_max_delta >= 8.0
-        and gas_drop_8s > -3.0
-        and gas_speed_5_8s > -0.45
-        and late_gas_per_hum < 0.50
+        and gas_drop_8s > -4.0
+        and gas_speed_5_8s > -0.75
+        and late_gas_per_hum < 0.70
     )
 
     ethanol_water_late_shape = (
-        hum_max_delta >= 8.0
-        and gas_drop_8s <= -3.0
-        and gas_speed_5_8s <= -0.55
-        and late_gas_per_hum >= 0.55
+        hum_max_delta >= 9.0
+        and gas_drop_8s <= -4.2
+        and gas_speed_5_8s <= -0.75
+        and gas_late_extra_drop <= -0.90
+        and late_gas_per_hum >= 0.70
     )
 
     ipa_water_late_soft = (
         hum_max_delta >= 8.0
-        and gas_late_extra_drop > -0.55
-        and late_gas_per_hum < 0.55
+        and gas_late_extra_drop > -0.80
+        and late_gas_per_hum < 0.70
     )
 
     ethanol_water_late_soft = (
-        hum_max_delta >= 8.0
-        and gas_late_extra_drop <= -0.80
-        and late_gas_per_hum >= 0.55
+        hum_max_delta >= 9.0
+        and gas_late_extra_drop <= -1.05
+        and late_gas_per_hum >= 0.72
+        and gas_drop_8s <= -4.2
     )
 
     if ethanol_strong:
@@ -1137,18 +1139,18 @@ def adjust_for_water_mixed_ipa(feature, pct):
         ipa += 7.0
 
     if ethanol_water_late_shape:
-        eth += 10.0
-        ipa -= 2.0
+        eth += 7.0
+        ipa -= 1.0
 
     if ipa_water_late_shape and not ethanol_strong and not ethanol_water_late_shape:
         ipa += 10.0
-        eth -= 2.0
+        eth -= 3.0
 
     if ethanol_water_late_soft:
-        eth += 5.0
+        eth += 3.0
 
     if ipa_water_late_soft and not ethanol_water_late_shape:
-        ipa += 5.0
+        ipa += 6.0
 
     water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
 
@@ -1160,17 +1162,16 @@ def adjust_for_water_mixed_ipa(feature, pct):
             if not ethanol_strong and not ethanol_water_late_shape:
                 if ipa_water_late_shape or ipa_water_late_soft:
                     ipa += boost
-                    eth -= min(4.0, boost * 0.25)
+                    eth -= min(4.5, boost * 0.28)
                 else:
                     ipa += min(5.0, boost * 0.45)
         else:
-            if not ipa_water_late_shape:
-                if ethanol_water_late_shape or ethanol_water_late_soft:
-                    eth += boost
-                    if not ipa_clean_like:
-                        ipa -= min(4.0, boost * 0.25)
-                else:
-                    eth += min(5.0, boost * 0.45)
+            if ethanol_water_late_shape and not ipa_water_late_shape:
+                eth += min(7.0, boost * 0.60)
+                if not ipa_clean_like:
+                    ipa -= min(2.0, boost * 0.15)
+            elif ethanol_water_late_soft and not ipa_water_late_shape and not ipa_water_late_soft:
+                eth += min(3.0, boost * 0.30)
     else:
         if ipa_water_like and not ethanol_strong:
             ipa += 4.0
@@ -1207,17 +1208,17 @@ def adjust_for_water_mixed_ipa(feature, pct):
     if hum_max_delta >= 10.0 and gas_avg_pct > -6.0 and gas_drop_2s > -4.0 and not water_pct:
         ipa += 3.0
 
-    if mixed_water_region and late_gas_per_hum >= 0.65 and gas_late_extra_drop <= -0.75:
-        eth += 6.0
+    if mixed_water_region and late_gas_per_hum >= 0.72 and gas_late_extra_drop <= -1.0 and gas_drop_8s <= -4.2:
+        eth += 4.0
 
-    if mixed_water_region and late_gas_per_hum <= 0.45 and gas_late_extra_drop > -0.55 and not ethanol_strong:
-        ipa += 6.0
+    if mixed_water_region and late_gas_per_hum < 0.70 and gas_late_extra_drop > -0.90 and not ethanol_strong:
+        ipa += 7.0
 
-    if mixed_water_region and gas_drop_8s <= -4.0 and gas_speed_5_8s <= -0.65:
-        eth += 5.0
+    if mixed_water_region and gas_drop_8s <= -4.5 and gas_speed_5_8s <= -0.80 and late_gas_per_hum >= 0.70:
+        eth += 3.0
 
-    if mixed_water_region and gas_drop_8s > -2.5 and gas_speed_5_8s > -0.35 and not ethanol_strong:
-        ipa += 5.0
+    if mixed_water_region and gas_drop_8s > -4.0 and gas_speed_5_8s > -0.75 and not ethanol_strong:
+        ipa += 7.0
 
     temp_avg = to_float(feature.get("temp_avg", 0))
     temp_delta = to_float(feature.get("temp_delta", 0))
