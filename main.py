@@ -128,6 +128,12 @@ GROUP_LABELS = {
     "ETHANOL": "ETHANOL",
     "ETHANOL_HIGH": "ETHANOL",
     "ETHANOL_LOW": "ETHANOL",
+    "ETHANOL_WATER": "ETHANOL_WATER",
+}
+
+WATER_MIX_LABEL_GROUPS = {
+    "IPA_WATER": "IPA",
+    "ETHANOL_WATER": "ETHANOL",
 }
 
 
@@ -150,6 +156,7 @@ TRAIN_BUTTONS = [
     ("IPA 1000ppm", "IPA_1000"),
     ("IPA 10000ppm", "IPA_10000"),
     ("IPA + 물", "IPA_WATER"),
+    ("에탄올 + 물", "ETHANOL_WATER"),
 ]
 
 
@@ -470,6 +477,7 @@ def label_detail_korean(label):
         "IPA_1000": "IPA 1000ppm",
         "IPA_10000": "IPA 10000ppm",
         "IPA_WATER": "IPA + 물",
+        "ETHANOL_WATER": "에탄올 + 물",
     }
     return names.get(label, label)
 
@@ -932,13 +940,60 @@ def classify_ipa_ethanol(feature):
     return pct, winner, detail_scores
 
 
+
+def classify_water_mixed_reference(feature):
+    samples = load_csv(SAMPLES_CSV)
+    usable = []
+
+    for s in samples:
+        label = s.get("label", "")
+        if label in WATER_MIX_LABEL_GROUPS:
+            usable.append(s)
+
+    group_counts = {"IPA": 0, "ETHANOL": 0}
+
+    for s in usable:
+        group = WATER_MIX_LABEL_GROUPS.get(s.get("label", ""), "")
+        if group in group_counts:
+            group_counts[group] += 1
+
+    if group_counts["IPA"] <= 0 or group_counts["ETHANOL"] <= 0:
+        return None, None, group_counts
+
+    scores = {"IPA": 0.0, "ETHANOL": 0.0}
+    cur_duration = to_float(feature.get("duration_sec", 0))
+
+    for s in usable:
+        label = s.get("label", "")
+        group = WATER_MIX_LABEL_GROUPS.get(label, "")
+        if group not in scores:
+            continue
+
+        d = feature_distance(feature, s)
+        w = 1.0 / (1.0 + d)
+        sample_duration = to_float(s.get("duration_sec", 0))
+        w *= time_weight(cur_duration, sample_duration)
+        scores[group] += w
+
+    total = scores["IPA"] + scores["ETHANOL"]
+
+    if total <= 0:
+        return None, None, group_counts
+
+    pct = {
+        "IPA": round(scores["IPA"] / total * 100.0, 1),
+        "ETHANOL": round(scores["ETHANOL"] / total * 100.0, 1),
+    }
+
+    winner = "IPA" if pct["IPA"] >= pct["ETHANOL"] else "ETHANOL"
+    return pct, winner, group_counts
+
 def adjust_for_water_mixed_ipa(feature, pct):
     ipa = float(pct.get("IPA", 0.0))
     eth = float(pct.get("ETHANOL", 0.0))
 
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
-    hum_end_delta = to_float(feature.get("hum_end_delta", 0))
     gas_min_pct = to_float(feature.get("gas_min_pct", 0))
     gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
     gas_end_pct = to_float(feature.get("gas_end_pct", 0))
@@ -954,11 +1009,8 @@ def adjust_for_water_mixed_ipa(feature, pct):
     gas_speed_2_5s = to_float(feature.get("gas_speed_2_5s", 0))
     gas_speed_5_8s = to_float(feature.get("gas_speed_5_8s", 0))
     hum_speed_0_2s = to_float(feature.get("hum_speed_0_2s", 0))
-    hum_speed_2_5s = to_float(feature.get("hum_speed_2_5s", 0))
     hum_speed_5_8s = to_float(feature.get("hum_speed_5_8s", 0))
-    hum_gas_ratio_2s = to_float(feature.get("hum_gas_ratio_2s", 0))
     hum_gas_ratio_5s = to_float(feature.get("hum_gas_ratio_5s", 0))
-    hum_gas_ratio_8s = to_float(feature.get("hum_gas_ratio_8s", 0))
     gas_early_late_gap = to_float(feature.get("gas_early_late_gap", 0))
     hum_early_late_gap = to_float(feature.get("hum_early_late_gap", 0))
     gas_accel_early_to_late = to_float(feature.get("gas_accel_early_to_late", 0))
@@ -1023,6 +1075,12 @@ def adjust_for_water_mixed_ipa(feature, pct):
         and hum_max_delta >= 8.0
     )
 
+    mixed_water_region = (
+        hum_max_delta >= 7.0
+        and hum_rise_8s >= 6.5
+        and hum_gas_ratio >= 0.65
+    )
+
     if ethanol_strong:
         eth += 15.0
 
@@ -1038,20 +1096,34 @@ def adjust_for_water_mixed_ipa(feature, pct):
     if ipa_clean_like:
         ipa += 7.0
 
-    if ipa_water_like and not ethanol_strong:
-        ipa += 12.0
-        eth -= 4.0
+    water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
 
-    if ipa_water_slow_gas and not ethanol_fast_gas:
-        ipa += 10.0
-        eth -= 3.0
+    if water_pct and mixed_water_region:
+        water_margin = abs(water_pct["IPA"] - water_pct["ETHANOL"])
+        boost = 8.0 + min(14.0, water_margin * 0.22)
 
-    if ipa_water_ratio_like and not ethanol_strong:
-        ipa += 8.0
-        eth -= 2.0
+        if water_winner == "IPA":
+            if not ethanol_strong:
+                ipa += boost
+                eth -= min(4.0, boost * 0.25)
+        else:
+            eth += boost
+            if not ipa_clean_like:
+                ipa -= min(4.0, boost * 0.25)
+    else:
+        if ipa_water_like and not ethanol_strong:
+            ipa += 4.0
+            eth -= 1.5
 
-    if ipa_water_late_humidity and not ethanol_strong:
-        ipa += 6.0
+        if ipa_water_slow_gas and not ethanol_fast_gas:
+            ipa += 4.0
+            eth -= 1.0
+
+        if ipa_water_ratio_like and not ethanol_strong:
+            ipa += 3.0
+
+        if ipa_water_late_humidity and not ethanol_strong:
+            ipa += 2.0
 
     if gas_drop_2s <= -6.5 and hum_rise_2s >= 2.0:
         eth += 5.0
@@ -1059,20 +1131,20 @@ def adjust_for_water_mixed_ipa(feature, pct):
     if gas_drop_4s <= -9.0 and hum_rise_4s >= 4.0:
         eth += 5.0
 
-    if gas_drop_8s > -8.5 and hum_rise_8s >= 9.0 and not ethanol_fast_gas:
-        ipa += 7.0
+    if gas_drop_8s > -8.5 and hum_rise_8s >= 9.0 and not ethanol_fast_gas and not water_pct:
+        ipa += 3.0
 
-    if hum_speed_5_8s > hum_speed_0_2s and gas_speed_5_8s > gas_speed_0_2s and hum_max_delta >= 8.0 and not ethanol_strong:
-        ipa += 4.0
+    if hum_speed_5_8s > hum_speed_0_2s and gas_speed_5_8s > gas_speed_0_2s and hum_max_delta >= 8.0 and not ethanol_strong and not water_pct:
+        ipa += 2.0
 
-    if gas_accel_early_to_late > 0.8 and hum_max_delta >= 8.0 and not ethanol_strong:
-        ipa += 4.0
+    if gas_accel_early_to_late > 0.8 and hum_max_delta >= 8.0 and not ethanol_strong and not water_pct:
+        ipa += 2.0
 
     if hum_max_delta >= 10.0 and gas_avg_pct <= -9.0 and gas_drop_2s <= -5.0:
         eth += 6.0
 
-    if hum_max_delta >= 10.0 and gas_avg_pct > -6.0 and gas_drop_2s > -4.0:
-        ipa += 8.0
+    if hum_max_delta >= 10.0 and gas_avg_pct > -6.0 and gas_drop_2s > -4.0 and not water_pct:
+        ipa += 3.0
 
     temp_avg = to_float(feature.get("temp_avg", 0))
     temp_delta = to_float(feature.get("temp_delta", 0))
