@@ -69,7 +69,8 @@ TRAIN_READY_SEC = 3.0
 TRAIN_RECORD_SEC = 10.0
 TRAIN_CURVE_STEP_SEC = 0.2
 TRAIN_FEATURE_INTERVAL_SEC = 999.0
-MIN_TRAIN_ROWS = 20
+MIN_TRAIN_ROWS = 8
+TRAIN_LOOSE_FALLBACK_MIN_ROWS = 8
 
 FONT_PATHS = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
@@ -527,6 +528,34 @@ def clean_rows(rows):
     out.sort(key=lambda x: x["epoch"])
     return out
 
+
+
+def clean_train_rows(rows):
+    strict = clean_rows(rows)
+    if len(strict) >= MIN_TRAIN_ROWS:
+        return strict, "STRICT"
+
+    loose = []
+    for r in rows:
+        gas = to_float(r.get("gas_ohm", 0))
+        if gas <= 0:
+            continue
+        rr = dict(r)
+        rr["epoch"] = to_float(rr.get("epoch", 0))
+        rr["gas_ohm"] = gas
+        rr["hum_pct"] = to_float(rr.get("hum_pct", 0))
+        rr["temp_c"] = to_float(rr.get("temp_c", 0))
+        rr["press_hpa"] = to_float(rr.get("press_hpa", 0))
+        rr["gas_adc"] = to_float(rr.get("gas_adc", 0))
+        rr["gas_range"] = to_float(rr.get("gas_range", 0))
+        rr["gas_valid"] = True
+        rr["heat_stable"] = True
+        rr["recordable"] = True
+        loose.append(rr)
+    loose.sort(key=lambda x: x["epoch"])
+    if len(loose) >= TRAIN_LOOSE_FALLBACK_MIN_ROWS:
+        return loose, "LOOSE_GAS_ONLY"
+    return strict, "INSUFFICIENT"
 
 def load_air_memory():
     rows = load_csv(AIR_MEMORY_CSV)
@@ -1772,7 +1801,7 @@ class App:
         self.cards["현재상태"].config(text=f"{label_detail_korean(label)} 학습대기 {TRAIN_READY_SEC:.0f}s", fg=self.yellow)
         self.cards["IPA"].config(text="-")
         self.cards["에탄올"].config(text="-")
-        self.update_status(f"{label_detail_korean(label)} 학습 대기 / {TRAIN_READY_SEC:.0f}초 뒤 0.2초 간격 기록")
+        self.update_status(f"{label_detail_korean(label)} 학습 대기 / {TRAIN_READY_SEC:.0f}초 뒤 센서값마다 기록")
 
     def begin_train_record(self):
         recent_air = [
@@ -1802,7 +1831,7 @@ class App:
         self.last_train_feature_time = 0
         self.train_saved_count = 0
         self.cards["현재상태"].config(text=f"{label_detail_korean(self.train_label)} 기록시작", fg=self.orange)
-        self.update_status(f"{label_detail_korean(self.train_label)} 기록 시작 / {TRAIN_CURVE_STEP_SEC:.1f}초 간격 / {TRAIN_RECORD_SEC:.0f}초")
+        self.update_status(f"{label_detail_korean(self.train_label)} 기록 시작 / 센서값마다 기록 / {TRAIN_RECORD_SEC:.0f}초")
 
     def process_train(self, row):
         if not self.train_mode:
@@ -1841,10 +1870,12 @@ class App:
 
     def finish_train(self):
         label = self.train_label
-        clean = clean_rows(self.train_rows)
+        total_rows = len(self.train_rows)
+        clean, train_quality = clean_train_rows(self.train_rows)
         saved = 0
+        clean_count = len(clean)
 
-        if len(clean) >= MIN_TRAIN_ROWS:
+        if clean_count >= MIN_TRAIN_ROWS:
             feature = extract_live_feature(
                 clean,
                 self.train_start_air_gas,
@@ -1853,7 +1884,10 @@ class App:
             )
 
             if feature:
-                feature["train_type"] = "ONE_SHOT_3SEC_READY_0P2SEC_CURVE_10SEC"
+                feature["train_type"] = "ONE_SHOT_3SEC_READY_SENSOR_EACH_READ_CURVE_10SEC"
+                feature["train_quality"] = train_quality
+                feature["train_total_rows"] = total_rows
+                feature["train_clean_rows"] = clean_count
                 feature["train_ref_gas"] = self.train_start_air_gas
                 feature["train_ref_hum"] = self.train_start_air_hum
                 feature["train_ref_temp"] = self.train_start_air_temp
@@ -1874,11 +1908,11 @@ class App:
         self.reset_live_state()
 
         if saved:
-            messagebox.showinfo("학습 완료", f"{label_detail_korean(label)} 학습 완료\n3초 대기 후 0초부터 {TRAIN_RECORD_SEC:.0f}초까지 0.2초 곡선 1개 저장")
+            messagebox.showinfo("학습 완료", f"{label_detail_korean(label)} 학습 완료\n3초 대기 후 0초부터 {TRAIN_RECORD_SEC:.0f}초까지 센서값 기준으로 1개 저장\n유효 {clean_count}개 / 전체 {total_rows}개 / 품질 {train_quality}")
             self.cards["현재상태"].config(text="LIVE 재시작", fg=self.blue)
             self.update_status("학습 완료 / LIVE 재시작")
         else:
-            messagebox.showwarning("학습 실패", "유효 데이터가 부족해서 저장하지 못했습니다.")
+            messagebox.showwarning("학습 실패", f"유효 데이터가 부족해서 저장하지 못했습니다.\n유효 {clean_count}개 / 전체 {total_rows}개\n현재 최소 기준 {MIN_TRAIN_ROWS}개")
             self.update_status("학습 실패 / 데이터 부족")
 
     def process_live(self, row):
@@ -2069,7 +2103,7 @@ class App:
         ).pack(pady=8)
 
         columns = (
-            "check", "id", "timestamp", "label", "group", "train_type", "duration_sec", "count",
+            "check", "id", "timestamp", "label", "group", "train_type", "train_quality", "train_total_rows", "train_clean_rows", "duration_sec", "count",
             "gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct",
             "hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_end_delta",
             "gas_drop_2s", "gas_drop_4s", "gas_drop_8s", "gas_drop_10s",
