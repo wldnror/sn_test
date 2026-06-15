@@ -815,17 +815,20 @@ def adjust_for_water_mixed_ipa(feature, pct):
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     gas_min_pct = to_float(feature.get("gas_min_pct", 0))
     gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
+    gas_slope = to_float(feature.get("gas_slope", 0))
     hum_gas_ratio = to_float(feature.get("hum_gas_ratio", 0))
 
     ethanol_strong = (
-        hum_max_delta >= 7.0
-        and abs(gas_min_pct) >= 14.0
+        hum_max_delta >= 8.0
+        and abs(gas_min_pct) >= 13.0
         and gas_avg_pct <= -7.0
+        and gas_slope <= -110.0
     )
 
     ethanol_humidity_pattern = (
         hum_max_delta >= 8.0
         and hum_gas_ratio >= 0.55
+        and gas_avg_pct <= -7.0
     )
 
     ipa_like = (
@@ -833,14 +836,24 @@ def adjust_for_water_mixed_ipa(feature, pct):
         or hum_gas_ratio <= 0.42
     )
 
-    if ethanol_strong:
-        eth += 10.0
+    ipa_water_like = (
+        hum_max_delta >= 8.0
+        and gas_avg_pct > -6.5
+        and gas_slope > -95.0
+    )
 
-    if ethanol_humidity_pattern and eth >= 45.0:
+    if ethanol_strong:
+        eth += 12.0
+
+    if ethanol_humidity_pattern and eth >= 43.0:
         eth += 6.0
 
     if ipa_like:
         ipa += 6.0
+
+    if ipa_water_like and not ethanol_strong:
+        ipa += 12.0
+        eth -= 4.0
 
     ipa = max(0.0, ipa)
     eth = max(0.0, eth)
