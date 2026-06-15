@@ -41,6 +41,12 @@ MIN_CLASSIFY_ROWS = 4
 
 ACTIVE_GAS_DROP_PCT = -3.0
 ACTIVE_HUM_RISE = 0.7
+ACTIVE_HUM_NEED_GAS_DROP_PCT = -1.5
+WATER_ONLY_HUM_DELTA = 8.0
+WATER_ONLY_GAS_MIN_ABS_PCT = 5.0
+WATER_ONLY_GAS_AVG_ABS_PCT = 3.5
+WATER_ONLY_GAS_SPEED_0_2S = -0.9
+WATER_ONLY_GAS_DROP_2S = -2.0
 
 AIR_STABLE_GAS_PCT = 2.0
 AIR_STABLE_HUM_DELTA = 0.5
@@ -1098,6 +1104,41 @@ def adjust_for_water_mixed_ipa(feature, pct):
     winner = "IPA" if new_pct["IPA"] >= new_pct["ETHANOL"] else "ETHANOL"
     return new_pct, winner
 
+def is_water_only_reaction(feature):
+    hum_max_delta = to_float(feature.get("hum_max_delta", 0))
+    hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
+    hum_rise_8s = to_float(feature.get("hum_rise_8s", 0))
+    gas_min_pct = to_float(feature.get("gas_min_pct", 0))
+    gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
+    gas_drop_2s = to_float(feature.get("gas_drop_2s", 0))
+    gas_drop_4s = to_float(feature.get("gas_drop_4s", 0))
+    gas_speed_0_2s = to_float(feature.get("gas_speed_0_2s", 0))
+    gas_speed_2_5s = to_float(feature.get("gas_speed_2_5s", 0))
+    hum_gas_ratio = to_float(feature.get("hum_gas_ratio", 0))
+    hum_gas_ratio_8s = to_float(feature.get("hum_gas_ratio_8s", 0))
+
+    humidity_big = (
+        hum_max_delta >= WATER_ONLY_HUM_DELTA
+        and hum_avg_delta >= 5.0
+        and hum_rise_8s >= 7.0
+    )
+
+    gas_too_weak = (
+        abs(gas_min_pct) <= WATER_ONLY_GAS_MIN_ABS_PCT
+        and abs(gas_avg_pct) <= WATER_ONLY_GAS_AVG_ABS_PCT
+        and gas_drop_2s > WATER_ONLY_GAS_DROP_2S
+        and gas_drop_4s > -3.2
+        and gas_speed_0_2s > WATER_ONLY_GAS_SPEED_0_2S
+        and gas_speed_2_5s > -1.2
+    )
+
+    humidity_over_gas = (
+        hum_gas_ratio >= 1.8
+        or hum_gas_ratio_8s >= 1.6
+    )
+
+    return humidity_big and gas_too_weak and humidity_over_gas
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -1566,7 +1607,10 @@ class App:
 
         is_active = (
             gas_delta_pct <= ACTIVE_GAS_DROP_PCT
-            or (hum_delta >= ACTIVE_HUM_RISE and gas_delta_pct <= -1.0)
+            or (
+                hum_delta >= ACTIVE_HUM_RISE
+                and gas_delta_pct <= ACTIVE_HUM_NEED_GAS_DROP_PCT
+            )
         )
 
         is_return_normal = (
@@ -1637,6 +1681,10 @@ class App:
             )
 
             if not feature:
+                return
+
+            if is_water_only_reaction(feature):
+                self.reset_live_state()
                 return
 
             pct, winner, detail_scores = classify_ipa_ethanol(feature)
