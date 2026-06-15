@@ -52,7 +52,6 @@ MAX_AIR_HISTORY_ROWS = 1000
 
 DETECT_CONFIRM_COUNT = 2
 
-# 빠른 판정용. 3초는 너무 짧을 수 있어서 5초 권장.
 DECISION_DELAY_SEC = 5.0
 
 RETURN_GAS_PCT = 6.0
@@ -113,7 +112,6 @@ GAS_LOOKUP_2 = [
 cal = {}
 t_fine = 0.0
 
-# 최종 화면 라벨은 무조건 IPA / ETHANOL 두 개만 사용한다.
 GROUP_LABELS = {
     "IPA": "IPA",
     "IPA_HIGH": "IPA",
@@ -417,7 +415,6 @@ def append_dict_csv(path, row):
 
 
 def save_dict_csv(path, row):
-    # 학습 feature, AIR memory 같이 행 수가 적은 파일에 사용.
     rows = load_csv(path)
     rows.append(row)
     write_csv(path, rows)
@@ -613,9 +610,6 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     hum_avg_delta = hum_avg - hum_ref
     hum_end_delta = hum_end - hum_ref
 
-    # 핵심 추가 feature:
-    # Gas가 1% 떨어질 때 습도가 얼마나 같이 움직였는지.
-    # IPA+물 오판 보정에 사용한다. 최종 라벨은 여전히 IPA/에탄올만 사용.
     hum_gas_ratio = hum_max_delta / max(1.0, abs(gas_min_pct))
 
     early_n = max(2, min(len(rows), len(rows) // 3))
@@ -802,11 +796,6 @@ def classify_ipa_ethanol(feature):
 
 
 def adjust_for_water_mixed_ipa(feature, pct):
-    """
-    최종 라벨은 IPA/ETHANOL 두 개만 유지한다.
-    이 함수는 'IPA + 물'처럼 습도가 크게 올라 에탄올과 헷갈리는 상황에서
-    내부 점수만 보정한다. 화면에 WATER 같은 세 번째 라벨은 절대 표시하지 않는다.
-    """
     ipa = float(pct.get("IPA", 0.0))
     eth = float(pct.get("ETHANOL", 0.0))
 
@@ -815,37 +804,41 @@ def adjust_for_water_mixed_ipa(feature, pct):
     gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
     hum_gas_ratio = to_float(feature.get("hum_gas_ratio", 0))
 
-    # 현재 데이터 기준:
-    # 에탄올 강반응은 습도도 크고 Gas 하락도 강한 편.
     ethanol_strong = (
-        hum_max_delta >= 8.0
-        and abs(gas_min_pct) >= 17.0
-        and gas_avg_pct <= -10.0
-    )
-
-    # IPA 원액/일부 저농도 쪽은 습도 상승이 작거나 Gas 대비 습도 비율이 낮음.
-    ipa_like = (
-        hum_max_delta <= 6.5
-        or hum_gas_ratio <= 0.50
-    )
-
-    # IPA+물 의심 패턴:
-    # 습도는 크게 오르는데 Gas 하락이 ETHANOL_HIGH만큼 강하지 않은 경우.
-    water_mixed_ipa_like = (
         hum_max_delta >= 7.0
+        and abs(gas_min_pct) >= 14.0
+        and gas_avg_pct <= -7.0
+    )
+
+    ethanol_humidity_pattern = (
+        hum_max_delta >= 8.0
         and hum_gas_ratio >= 0.55
-        and abs(gas_min_pct) <= 16.0
+    )
+
+    ipa_like = (
+        hum_max_delta <= 5.5
+        or hum_gas_ratio <= 0.42
+    )
+
+    water_mixed_ipa_like = (
+        hum_max_delta >= 8.0
+        and hum_gas_ratio >= 0.65
+        and abs(gas_min_pct) <= 13.0
+        and gas_avg_pct > -8.0
     )
 
     if ethanol_strong:
-        eth += 8.0
+        eth += 10.0
+
+    if ethanol_humidity_pattern and eth >= 45.0:
+        eth += 6.0
 
     if ipa_like:
-        ipa += 8.0
+        ipa += 6.0
 
-    if water_mixed_ipa_like and not ethanol_strong:
-        ipa += 12.0
-        eth -= 8.0
+    if water_mixed_ipa_like and not ethanol_strong and eth < 55.0:
+        ipa += 4.0
+        eth -= 2.0
 
     ipa = max(0.0, ipa)
     eth = max(0.0, eth)
@@ -861,7 +854,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
 
     winner = "IPA" if new_pct["IPA"] >= new_pct["ETHANOL"] else "ETHANOL"
     return new_pct, winner
-
 
 class App:
     def __init__(self, root):
@@ -1329,7 +1321,6 @@ class App:
             and abs(hum_delta) <= AIR_STABLE_HUM_DELTA
         )
 
-        # 습도 단독 반응만으로 분석 진입하는 경우를 조금 줄임.
         is_active = (
             gas_delta_pct <= ACTIVE_GAS_DROP_PCT
             or (hum_delta >= ACTIVE_HUM_RISE and gas_delta_pct <= -1.0)
@@ -1414,7 +1405,6 @@ class App:
                 self.last_state_text = winner
                 return
 
-            # 내부 보정. 최종 winner는 무조건 IPA 또는 ETHANOL.
             pct, winner = adjust_for_water_mixed_ipa(feature, pct)
 
             self.result_winner = winner
@@ -1559,7 +1549,6 @@ class App:
                 row = read_sensor()
                 self.current_rows.append(row)
 
-                # raw 로그는 append 방식으로 저장해서 SD카드/CPU 부담을 줄임.
                 append_dict_csv(RAW_CSV, row)
 
                 raw_trim_counter += 1
