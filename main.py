@@ -710,14 +710,18 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
 
     gas_drop_1s = gas_drop_at(1.0)
     gas_drop_2s = gas_drop_at(2.0)
+    gas_drop_3s = gas_drop_at(3.0)
     gas_drop_4s = gas_drop_at(4.0)
+    gas_drop_5s = gas_drop_at(5.0)
     gas_drop_6s = gas_drop_at(6.0)
     gas_drop_8s = gas_drop_at(8.0)
     gas_drop_10s = gas_drop_at(10.0)
 
     hum_rise_1s = hum_rise_at(1.0)
     hum_rise_2s = hum_rise_at(2.0)
+    hum_rise_3s = hum_rise_at(3.0)
     hum_rise_4s = hum_rise_at(4.0)
+    hum_rise_5s = hum_rise_at(5.0)
     hum_rise_6s = hum_rise_at(6.0)
     hum_rise_8s = hum_rise_at(8.0)
     hum_rise_10s = hum_rise_at(10.0)
@@ -742,6 +746,18 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     hum_speed_5_8s = (hum_rise_8s - hum_rise_at(5.0)) / max(0.001, min(8.0, duration) - min(5.0, duration)) if duration > 5.0 else 0.0
     hum_speed_8_10s = (hum_rise_10s - hum_rise_8s) / max(0.001, min(10.0, duration) - min(8.0, duration)) if duration > 8.0 else 0.0
 
+    early_1_3_drop = gas_drop_3s - gas_drop_1s
+    mid_2_5_drop = gas_drop_5s - gas_drop_2s
+    early_1_3_speed = early_1_3_drop / 2.0
+    mid_2_5_speed = mid_2_5_drop / 3.0
+    early_hum_1_3_rise = hum_rise_3s - hum_rise_1s
+    mid_hum_2_5_rise = hum_rise_5s - hum_rise_2s
+    early_hum_1_3_speed = early_hum_1_3_rise / 2.0
+    mid_hum_2_5_speed = mid_hum_2_5_rise / 3.0
+    early_gas_per_hum_2s = abs(gas_drop_2s) / max(0.1, hum_rise_2s)
+    early_gas_per_hum_4s = abs(gas_drop_4s) / max(0.1, hum_rise_4s)
+    mid_gas_per_hum_5s = abs(gas_drop_5s) / max(0.1, hum_rise_5s)
+
     hum_gas_ratio_2s = hum_rise_2s / max(1.0, abs(gas_drop_2s))
     hum_gas_ratio_5s = hum_rise_at(5.0) / max(1.0, abs(gas_drop_at(5.0)))
     hum_gas_ratio_8s = hum_rise_8s / max(1.0, abs(gas_drop_8s))
@@ -760,6 +776,86 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     gas_accel_early_to_late = gas_speed_5_8s - gas_speed_0_2s
     hum_accel_early_to_late = hum_speed_5_8s - hum_speed_0_2s
 
+    gas_pct_series = [pct_from_ref(v) for v in gas]
+    hum_delta_series = [delta_from_ref(v) for v in hum]
+    reaction_idx = 0
+    consecutive = 0
+    for i, (gp, hd) in enumerate(zip(gas_pct_series, hum_delta_series)):
+        prev_gp = gas_pct_series[i - 1] if i > 0 else gp
+        gas_step = gp - prev_gp
+        active_frame = (gp <= -0.35) or (hd >= 0.25) or (gas_step <= -0.30)
+        if active_frame:
+            consecutive += 1
+        else:
+            consecutive = 0
+        if consecutive >= 2:
+            reaction_idx = max(0, i - 1)
+            break
+
+    reaction_start_epoch = rows[reaction_idx]["epoch"]
+    reaction_offset_sec = max(0.0, reaction_start_epoch - start_epoch)
+    reaction_duration_sec = max(0.001, end_epoch - reaction_start_epoch)
+    reaction_detected = 1 if reaction_idx > 0 else 0
+
+    def value_at_reaction_sec(values, sec):
+        target = reaction_start_epoch + min(sec, reaction_duration_sec)
+        best = values[-1]
+        best_dt = 999999.0
+        for r, v in zip(rows, values):
+            dt = abs(r["epoch"] - target)
+            if dt < best_dt:
+                best_dt = dt
+                best = v
+        return best
+
+    def rs_gas_drop_at(sec):
+        return pct_from_ref(value_at_reaction_sec(gas, sec))
+
+    def rs_hum_rise_at(sec):
+        return delta_from_ref(value_at_reaction_sec(hum, sec))
+
+    rs_gas_drop_1s = rs_gas_drop_at(1.0)
+    rs_gas_drop_2s = rs_gas_drop_at(2.0)
+    rs_gas_drop_3s = rs_gas_drop_at(3.0)
+    rs_gas_drop_4s = rs_gas_drop_at(4.0)
+    rs_gas_drop_5s = rs_gas_drop_at(5.0)
+    rs_gas_drop_8s = rs_gas_drop_at(8.0)
+    rs_gas_drop_10s = rs_gas_drop_at(10.0)
+
+    rs_hum_rise_1s = rs_hum_rise_at(1.0)
+    rs_hum_rise_2s = rs_hum_rise_at(2.0)
+    rs_hum_rise_3s = rs_hum_rise_at(3.0)
+    rs_hum_rise_4s = rs_hum_rise_at(4.0)
+    rs_hum_rise_5s = rs_hum_rise_at(5.0)
+    rs_hum_rise_8s = rs_hum_rise_at(8.0)
+    rs_hum_rise_10s = rs_hum_rise_at(10.0)
+
+    rs_early_1_3_drop = rs_gas_drop_3s - rs_gas_drop_1s
+    rs_mid_2_5_drop = rs_gas_drop_5s - rs_gas_drop_2s
+    rs_early_1_3_speed = rs_early_1_3_drop / 2.0
+    rs_mid_2_5_speed = rs_mid_2_5_drop / 3.0
+    rs_gas_speed_0_2s = rs_gas_drop_2s - rs_gas_drop_1s
+    rs_gas_speed_2_5s = rs_mid_2_5_speed
+
+    rs_early_hum_1_3_rise = rs_hum_rise_3s - rs_hum_rise_1s
+    rs_mid_hum_2_5_rise = rs_hum_rise_5s - rs_hum_rise_2s
+    rs_early_hum_1_3_speed = rs_early_hum_1_3_rise / 2.0
+    rs_mid_hum_2_5_speed = rs_mid_hum_2_5_rise / 3.0
+
+    gas_total_drop_norm = max(0.1, abs(rs_gas_drop_10s), abs(gas_min_pct))
+    hum_total_rise_norm = max(0.1, rs_hum_rise_10s, hum_max_delta)
+    rs_gas_ratio_1s = abs(rs_gas_drop_1s) / gas_total_drop_norm
+    rs_gas_ratio_2s = abs(rs_gas_drop_2s) / gas_total_drop_norm
+    rs_gas_ratio_3s = abs(rs_gas_drop_3s) / gas_total_drop_norm
+    rs_gas_ratio_4s = abs(rs_gas_drop_4s) / gas_total_drop_norm
+    rs_gas_ratio_5s = abs(rs_gas_drop_5s) / gas_total_drop_norm
+    rs_mid_ratio_2_5 = abs(rs_gas_drop_5s - rs_gas_drop_2s) / gas_total_drop_norm
+    rs_late_ratio_5_10 = abs(rs_gas_drop_10s - rs_gas_drop_5s) / gas_total_drop_norm
+
+    rs_hum_ratio_2s = max(0.0, rs_hum_rise_2s) / hum_total_rise_norm
+    rs_hum_ratio_4s = max(0.0, rs_hum_rise_4s) / hum_total_rise_norm
+    rs_hum_ratio_5s = max(0.0, rs_hum_rise_5s) / hum_total_rise_norm
+
     temp_delta = temp[-1] - temp[0]
     press_delta = press[-1] - press[0]
 
@@ -772,6 +868,8 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         key_sec = f"{sec:.1f}".replace(".", "p")
         curve_features[f"gas_curve_{key_sec}s"] = gas_drop_at(sec)
         curve_features[f"hum_curve_{key_sec}s"] = hum_rise_at(sec)
+        curve_features[f"rs_gas_curve_{key_sec}s"] = rs_gas_drop_at(sec)
+        curve_features[f"rs_hum_curve_{key_sec}s"] = rs_hum_rise_at(sec)
 
     return {
         **curve_features,
@@ -782,6 +880,12 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         "detail": label,
         "duration_sec": duration,
         "count": len(rows),
+        "reaction_detected": reaction_detected,
+        "reaction_offset_sec": reaction_offset_sec,
+        "reaction_duration_sec": reaction_duration_sec,
+        "reaction_index": reaction_idx,
+        "gas_total_drop_norm": gas_total_drop_norm,
+        "hum_total_rise_norm": hum_total_rise_norm,
         "gas_ref": gas_ref,
         "gas_now": gas_now,
         "gas_avg": gas_avg,
@@ -796,10 +900,32 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         "late_vs_early_pct": ((late_gas - early_gas) / early_gas) * 100.0 if early_gas else 0.0,
         "gas_drop_1s": gas_drop_1s,
         "gas_drop_2s": gas_drop_2s,
+        "gas_drop_3s": gas_drop_3s,
         "gas_drop_4s": gas_drop_4s,
+        "gas_drop_5s": gas_drop_5s,
         "gas_drop_6s": gas_drop_6s,
         "gas_drop_8s": gas_drop_8s,
         "gas_drop_10s": gas_drop_10s,
+        "rs_gas_drop_1s": rs_gas_drop_1s,
+        "rs_gas_drop_2s": rs_gas_drop_2s,
+        "rs_gas_drop_3s": rs_gas_drop_3s,
+        "rs_gas_drop_4s": rs_gas_drop_4s,
+        "rs_gas_drop_5s": rs_gas_drop_5s,
+        "rs_gas_drop_8s": rs_gas_drop_8s,
+        "rs_gas_drop_10s": rs_gas_drop_10s,
+        "rs_gas_speed_0_2s": rs_gas_speed_0_2s,
+        "rs_gas_speed_2_5s": rs_gas_speed_2_5s,
+        "rs_early_1_3_drop": rs_early_1_3_drop,
+        "rs_mid_2_5_drop": rs_mid_2_5_drop,
+        "rs_early_1_3_speed": rs_early_1_3_speed,
+        "rs_mid_2_5_speed": rs_mid_2_5_speed,
+        "rs_gas_ratio_1s": rs_gas_ratio_1s,
+        "rs_gas_ratio_2s": rs_gas_ratio_2s,
+        "rs_gas_ratio_3s": rs_gas_ratio_3s,
+        "rs_gas_ratio_4s": rs_gas_ratio_4s,
+        "rs_gas_ratio_5s": rs_gas_ratio_5s,
+        "rs_mid_ratio_2_5": rs_mid_ratio_2_5,
+        "rs_late_ratio_5_10": rs_late_ratio_5_10,
         "gas_avg_0_2": gas_avg_0_2,
         "gas_avg_2_5": gas_avg_2_5,
         "gas_avg_5_8": gas_avg_5_8,
@@ -808,6 +934,13 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         "gas_speed_2_5s": gas_speed_2_5s,
         "gas_speed_5_8s": gas_speed_5_8s,
         "gas_speed_8_10s": gas_speed_8_10s,
+        "early_1_3_drop": early_1_3_drop,
+        "mid_2_5_drop": mid_2_5_drop,
+        "early_1_3_speed": early_1_3_speed,
+        "mid_2_5_speed": mid_2_5_speed,
+        "early_gas_per_hum_2s": early_gas_per_hum_2s,
+        "early_gas_per_hum_4s": early_gas_per_hum_4s,
+        "mid_gas_per_hum_5s": mid_gas_per_hum_5s,
         "gas_early_late_gap": gas_early_late_gap,
         "gas_accel_early_to_late": gas_accel_early_to_late,
         "hum_ref": hum_ref,
@@ -824,10 +957,26 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         "hum_gas_ratio": hum_gas_ratio,
         "hum_rise_1s": hum_rise_1s,
         "hum_rise_2s": hum_rise_2s,
+        "hum_rise_3s": hum_rise_3s,
         "hum_rise_4s": hum_rise_4s,
+        "hum_rise_5s": hum_rise_5s,
         "hum_rise_6s": hum_rise_6s,
         "hum_rise_8s": hum_rise_8s,
         "hum_rise_10s": hum_rise_10s,
+        "rs_hum_rise_1s": rs_hum_rise_1s,
+        "rs_hum_rise_2s": rs_hum_rise_2s,
+        "rs_hum_rise_3s": rs_hum_rise_3s,
+        "rs_hum_rise_4s": rs_hum_rise_4s,
+        "rs_hum_rise_5s": rs_hum_rise_5s,
+        "rs_hum_rise_8s": rs_hum_rise_8s,
+        "rs_hum_rise_10s": rs_hum_rise_10s,
+        "rs_early_hum_1_3_rise": rs_early_hum_1_3_rise,
+        "rs_mid_hum_2_5_rise": rs_mid_hum_2_5_rise,
+        "rs_early_hum_1_3_speed": rs_early_hum_1_3_speed,
+        "rs_mid_hum_2_5_speed": rs_mid_hum_2_5_speed,
+        "rs_hum_ratio_2s": rs_hum_ratio_2s,
+        "rs_hum_ratio_4s": rs_hum_ratio_4s,
+        "rs_hum_ratio_5s": rs_hum_ratio_5s,
         "hum_avg_0_2": hum_avg_0_2,
         "hum_avg_2_5": hum_avg_2_5,
         "hum_avg_5_8": hum_avg_5_8,
@@ -836,6 +985,10 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         "hum_speed_2_5s": hum_speed_2_5s,
         "hum_speed_5_8s": hum_speed_5_8s,
         "hum_speed_8_10s": hum_speed_8_10s,
+        "early_hum_1_3_rise": early_hum_1_3_rise,
+        "mid_hum_2_5_rise": mid_hum_2_5_rise,
+        "early_hum_1_3_speed": early_hum_1_3_speed,
+        "mid_hum_2_5_speed": mid_hum_2_5_speed,
         "hum_gas_ratio_2s": hum_gas_ratio_2s,
         "hum_gas_ratio_5s": hum_gas_ratio_5s,
         "hum_gas_ratio_8s": hum_gas_ratio_8s,
@@ -882,14 +1035,34 @@ def numeric_keys(row):
 
 
 def key_scale(key):
+    if key.startswith("rs_gas_curve_"):
+        return 12.0
+    if key.startswith("rs_hum_curve_"):
+        return 10.0
+    if key in ["reaction_offset_sec", "reaction_duration_sec", "reaction_detected"]:
+        return 2.0
+    if key.startswith("rs_gas_drop_"):
+        return 12.0
+    if key.startswith("rs_hum_rise_"):
+        return 10.0
+    if key in ["rs_gas_speed_0_2s", "rs_gas_speed_2_5s", "rs_early_1_3_speed", "rs_mid_2_5_speed"]:
+        return 12.0
+    if key in ["rs_early_1_3_drop", "rs_mid_2_5_drop", "rs_early_hum_1_3_rise", "rs_mid_hum_2_5_rise"]:
+        return 11.0
+    if key in ["rs_gas_ratio_1s", "rs_gas_ratio_2s", "rs_gas_ratio_3s", "rs_gas_ratio_4s", "rs_gas_ratio_5s", "rs_mid_ratio_2_5", "rs_late_ratio_5_10"]:
+        return 18.0
+    if key in ["rs_hum_ratio_2s", "rs_hum_ratio_4s", "rs_hum_ratio_5s"]:
+        return 11.0
     if key.startswith("gas_curve_"):
         return 8.5
     if key.startswith("hum_curve_"):
         return 7.5
     if key in ["hum_gas_ratio", "hum_gas_ratio_2s", "hum_gas_ratio_5s", "hum_gas_ratio_8s", "hum_gas_ratio_10s"]:
         return 9.0
+    if key in ["early_gas_per_hum_2s", "early_gas_per_hum_4s", "mid_gas_per_hum_5s"]:
+        return 15.0
     if key in ["late_gas_per_hum", "late_gas_per_hum_6_8", "late10_gas_per_hum", "late10_extra_gas_per_hum"]:
-        return 13.0
+        return 5.0
     if key in ["gas_late_extra_drop", "gas_extra_drop_8_10s"]:
         return 10.0
     if key == "hum_extra_rise_8_10s":
@@ -900,8 +1073,12 @@ def key_scale(key):
         return 0.01
     if key in ["hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_end_delta"]:
         return 8.0
-    if key in ["hum_rise_1s", "hum_rise_2s", "hum_rise_4s", "hum_rise_6s", "hum_rise_8s", "hum_rise_10s"]:
-        return 7.0
+    if key in ["hum_rise_1s", "hum_rise_2s", "hum_rise_3s", "hum_rise_4s", "hum_rise_5s"]:
+        return 11.0
+    if key in ["hum_rise_6s", "hum_rise_8s", "hum_rise_10s"]:
+        return 5.0
+    if key in ["early_hum_1_3_rise", "mid_hum_2_5_rise", "early_hum_1_3_speed", "mid_hum_2_5_speed"]:
+        return 11.0
     if key in ["hum_speed_0_2s", "hum_speed_2_5s", "hum_speed_5_8s", "hum_speed_8_10s"]:
         return 12.0
     if key == "hum_rise_speed":
@@ -914,12 +1091,18 @@ def key_scale(key):
         return 1.8
     if key in ["gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct", "late_vs_early_pct"]:
         return 7.5
-    if key in ["gas_drop_1s", "gas_drop_2s", "gas_drop_4s", "gas_drop_6s", "gas_drop_8s", "gas_drop_10s"]:
-        return 8.0
+    if key in ["gas_drop_1s", "gas_drop_2s", "gas_drop_3s", "gas_drop_4s", "gas_drop_5s"]:
+        return 13.0
+    if key in ["gas_drop_6s", "gas_drop_8s", "gas_drop_10s"]:
+        return 5.0
+    if key in ["early_1_3_drop", "mid_2_5_drop", "early_1_3_speed", "mid_2_5_speed"]:
+        return 14.0
     if key in ["gas_avg_0_2", "gas_avg_2_5", "gas_avg_5_8", "gas_avg_8_10"]:
         return 7.5
-    if key in ["gas_speed_0_2s", "gas_speed_2_5s", "gas_speed_5_8s", "gas_speed_8_10s"]:
-        return 7.5
+    if key in ["gas_speed_0_2s", "gas_speed_2_5s"]:
+        return 13.0
+    if key in ["gas_speed_5_8s", "gas_speed_8_10s"]:
+        return 4.0
     if key in ["gas_early_late_gap", "gas_accel_early_to_late"]:
         return 7.0
     if key == "gas_slope":
@@ -1073,264 +1256,237 @@ def adjust_for_water_mixed_ipa(feature, pct):
 
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
+    hum_end_delta = to_float(feature.get("hum_end_delta", 0))
     gas_min_pct = to_float(feature.get("gas_min_pct", 0))
     gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
     gas_end_pct = to_float(feature.get("gas_end_pct", 0))
-    gas_slope = to_float(feature.get("gas_slope", 0))
     hum_gas_ratio = to_float(feature.get("hum_gas_ratio", 0))
+
+    gas_drop_1s = to_float(feature.get("gas_drop_1s", 0))
     gas_drop_2s = to_float(feature.get("gas_drop_2s", 0))
+    gas_drop_3s = to_float(feature.get("gas_drop_3s", gas_drop_2s))
     gas_drop_4s = to_float(feature.get("gas_drop_4s", 0))
+    gas_drop_5s = to_float(feature.get("gas_drop_5s", gas_drop_4s))
     gas_drop_8s = to_float(feature.get("gas_drop_8s", 0))
     gas_drop_10s = to_float(feature.get("gas_drop_10s", gas_drop_8s))
-    gas_late_extra_drop = to_float(feature.get("gas_late_extra_drop", 0))
-    gas_extra_drop_8_10s = to_float(feature.get("gas_extra_drop_8_10s", 0))
-    late_gas_per_hum = to_float(feature.get("late_gas_per_hum", 0))
-    late_gas_per_hum_6_8 = to_float(feature.get("late_gas_per_hum_6_8", 0))
-    late10_gas_per_hum = to_float(feature.get("late10_gas_per_hum", late_gas_per_hum))
-    late10_extra_gas_per_hum = to_float(feature.get("late10_extra_gas_per_hum", 0))
+
+    hum_rise_1s = to_float(feature.get("hum_rise_1s", 0))
     hum_rise_2s = to_float(feature.get("hum_rise_2s", 0))
+    hum_rise_3s = to_float(feature.get("hum_rise_3s", hum_rise_2s))
     hum_rise_4s = to_float(feature.get("hum_rise_4s", 0))
+    hum_rise_5s = to_float(feature.get("hum_rise_5s", hum_rise_4s))
     hum_rise_8s = to_float(feature.get("hum_rise_8s", 0))
     hum_rise_10s = to_float(feature.get("hum_rise_10s", hum_rise_8s))
+
     gas_speed_0_2s = to_float(feature.get("gas_speed_0_2s", 0))
     gas_speed_2_5s = to_float(feature.get("gas_speed_2_5s", 0))
     gas_speed_5_8s = to_float(feature.get("gas_speed_5_8s", 0))
     gas_speed_8_10s = to_float(feature.get("gas_speed_8_10s", 0))
-    hum_speed_0_2s = to_float(feature.get("hum_speed_0_2s", 0))
-    hum_speed_5_8s = to_float(feature.get("hum_speed_5_8s", 0))
-    hum_gas_ratio_5s = to_float(feature.get("hum_gas_ratio_5s", 0))
-    gas_early_late_gap = to_float(feature.get("gas_early_late_gap", 0))
-    hum_early_late_gap = to_float(feature.get("hum_early_late_gap", 0))
-    gas_accel_early_to_late = to_float(feature.get("gas_accel_early_to_late", 0))
+
+    early_1_3_drop = to_float(feature.get("early_1_3_drop", gas_drop_3s - gas_drop_1s))
+    mid_2_5_drop = to_float(feature.get("mid_2_5_drop", gas_drop_5s - gas_drop_2s))
+    early_1_3_speed = to_float(feature.get("early_1_3_speed", early_1_3_drop / 2.0))
+    mid_2_5_speed = to_float(feature.get("mid_2_5_speed", mid_2_5_drop / 3.0))
+    early_hum_1_3_rise = to_float(feature.get("early_hum_1_3_rise", hum_rise_3s - hum_rise_1s))
+    mid_hum_2_5_rise = to_float(feature.get("mid_hum_2_5_rise", hum_rise_5s - hum_rise_2s))
+
+    gas_extra_drop_8_10s = to_float(feature.get("gas_extra_drop_8_10s", gas_drop_10s - gas_drop_8s))
+    late10_gas_per_hum = to_float(feature.get("late10_gas_per_hum", abs(gas_drop_10s) / max(0.1, hum_rise_10s)))
     duration_sec = to_float(feature.get("duration_sec", 0))
-
-    ethanol_strong = (
-        hum_max_delta >= 8.0
-        and abs(gas_min_pct) >= 13.0
-        and gas_avg_pct <= -7.0
-        and gas_drop_2s <= -4.5
-        and gas_speed_0_2s <= -2.0
-    )
-
-    ethanol_fast_gas = (
-        gas_drop_2s <= -5.0
-        and gas_drop_4s <= -8.0
-        and gas_avg_pct <= -7.0
-    )
-
-    ethanol_deep_gas = (
-        abs(gas_min_pct) >= 14.0
-        and gas_end_pct <= -8.0
-        and gas_slope <= -95.0
-    )
-
-    ethanol_humidity_with_gas = (
-        hum_max_delta >= 8.0
-        and hum_avg_delta >= 5.0
-        and gas_avg_pct <= -7.0
-        and hum_gas_ratio <= 1.35
-    )
-
-    ipa_clean_like = (
-        hum_max_delta <= 6.0
-        or hum_gas_ratio <= 0.45
-        or hum_rise_8s <= 5.0
-    )
-
-    ipa_water_like = (
-        hum_max_delta >= 8.0
-        and hum_rise_8s >= 8.0
-        and gas_avg_pct > -7.0
-        and abs(gas_min_pct) <= 12.5
-        and gas_drop_2s > -5.0
-    )
-
-    ipa_water_slow_gas = (
-        hum_max_delta >= 8.0
-        and gas_speed_0_2s > -2.0
-        and gas_speed_2_5s > -2.5
-        and hum_speed_0_2s >= 0.4
-    )
-
-    ipa_water_ratio_like = (
-        hum_gas_ratio >= 1.0
-        and hum_gas_ratio_5s >= 0.9
-        and abs(gas_min_pct) <= 13.0
-    )
-
-    ipa_water_late_humidity = (
-        hum_early_late_gap >= 3.0
-        and gas_early_late_gap < 5.5
-        and hum_max_delta >= 8.0
-    )
+    rs_gas_drop_2s = to_float(feature.get("rs_gas_drop_2s", gas_drop_2s))
+    rs_gas_drop_4s = to_float(feature.get("rs_gas_drop_4s", gas_drop_4s))
+    rs_gas_drop_5s = to_float(feature.get("rs_gas_drop_5s", gas_drop_5s))
+    rs_gas_speed_0_2s = to_float(feature.get("rs_gas_speed_0_2s", gas_speed_0_2s))
+    rs_early_1_3_speed = to_float(feature.get("rs_early_1_3_speed", early_1_3_speed))
+    rs_mid_2_5_speed = to_float(feature.get("rs_mid_2_5_speed", mid_2_5_speed))
+    rs_gas_ratio_2s = to_float(feature.get("rs_gas_ratio_2s", 0))
+    rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
+    rs_mid_ratio_2_5 = to_float(feature.get("rs_mid_ratio_2_5", 0))
+    rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
+    rs_hum_rise_2s = to_float(feature.get("rs_hum_rise_2s", hum_rise_2s))
+    rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", hum_rise_4s))
 
     mixed_water_region = (
-        hum_max_delta >= 7.0
-        and hum_rise_8s >= 6.5
-        and hum_gas_ratio >= 0.65
+        hum_max_delta >= 6.0
+        and hum_rise_8s >= 4.5
+        and abs(gas_min_pct) <= 13.0
+        and abs(gas_avg_pct) <= 8.0
     )
 
-    ipa_water_late_shape = (
-        hum_max_delta >= 8.0
-        and gas_drop_8s > -4.0
-        and gas_speed_5_8s > -0.75
-        and late_gas_per_hum < 0.70
+    ethanol_strong = (
+        hum_max_delta >= 8.5
+        and abs(gas_min_pct) >= 13.0
+        and gas_avg_pct <= -7.5
+        and gas_drop_2s <= -3.5
+        and gas_drop_4s <= -5.5
     )
 
-    ethanol_water_late_shape = (
-        hum_max_delta >= 9.0
-        and gas_drop_8s <= -4.2
-        and gas_speed_5_8s <= -0.75
-        and gas_late_extra_drop <= -0.90
-        and late_gas_per_hum >= 0.70
+    ipa_dilute_like = (
+        hum_end_delta <= -0.8
+        or hum_avg_delta <= -0.5
+        or hum_max_delta < 5.0
     )
 
-    ipa_water_late_soft = (
-        hum_max_delta >= 8.0
-        and gas_late_extra_drop > -0.80
-        and late_gas_per_hum < 0.70
+    ipa_water_early_like = (
+        mixed_water_region
+        and gas_drop_2s > -0.70
+        and gas_drop_4s > -2.20
+        and gas_speed_0_2s > -0.60
     )
 
-    ethanol_water_late_soft = (
-        hum_max_delta >= 9.0
-        and gas_late_extra_drop <= -1.05
-        and late_gas_per_hum >= 0.72
-        and gas_drop_8s <= -4.2
+    ipa_water_early_hum_like = (
+        mixed_water_region
+        and hum_rise_2s < 0.35
+        and hum_rise_4s < 1.70
     )
 
-    water_10_ready = duration_sec >= 9.5
-
-    ethanol_water_10s = (
-        water_10_ready
-        and hum_max_delta >= 8.5
-        and hum_rise_10s >= 7.5
-        and gas_drop_10s <= -4.2
-        and gas_extra_drop_8_10s <= -0.45
-        and late10_gas_per_hum >= 0.62
+    ipa_water_curve_like = (
+        mixed_water_region
+        and early_1_3_speed > -0.55
+        and mid_2_5_speed > -0.85
+        and early_hum_1_3_rise < 1.20
     )
 
-    ipa_water_10s = (
-        water_10_ready
-        and hum_max_delta >= 8.0
-        and hum_rise_10s >= 7.0
-        and (
-            gas_drop_10s > -4.2
-            or gas_extra_drop_8_10s > -0.45
-            or late10_gas_per_hum < 0.62
-            or gas_speed_8_10s > -0.35
-        )
+    ethanol_water_early_like = (
+        mixed_water_region
+        and hum_max_delta >= 7.0
+        and gas_drop_2s <= -0.80
+        and gas_drop_4s <= -2.30
+        and gas_speed_0_2s <= -0.65
+    )
+
+    ethanol_water_early_hum_like = (
+        mixed_water_region
+        and hum_rise_2s >= 0.35
+        and hum_rise_4s >= 1.60
+    )
+
+    ethanol_water_curve_like = (
+        mixed_water_region
+        and early_1_3_speed <= -0.60
+        and mid_2_5_speed <= -0.85
+        and gas_drop_5s <= -3.0
+    )
+
+    rs_ipa_water_shape = (
+        mixed_water_region
+        and rs_gas_drop_2s > -0.85
+        and rs_gas_drop_4s > -2.35
+        and rs_gas_speed_0_2s > -0.75
+        and rs_early_1_3_speed > -0.70
+        and rs_mid_2_5_speed > -0.95
+        and rs_gas_ratio_2s < 0.24
+        and rs_gas_ratio_4s < 0.55
+    )
+
+    rs_ethanol_water_shape = (
+        mixed_water_region
+        and rs_gas_drop_2s <= -0.85
+        and rs_gas_drop_4s <= -2.35
+        and rs_gas_speed_0_2s <= -0.75
+        and rs_gas_ratio_2s >= 0.24
+        and rs_gas_ratio_4s >= 0.50
+    )
+
+    rs_late_loaded_ipa = (
+        mixed_water_region
+        and rs_gas_ratio_2s < 0.22
+        and rs_gas_ratio_4s < 0.55
+        and rs_mid_ratio_2_5 >= 0.18
+        and rs_late_ratio_5_10 >= 0.25
     )
 
     if ethanol_strong:
-        eth += 15.0
+        eth += 14.0
 
-    if ethanol_fast_gas:
-        eth += 9.0
-
-    if ethanol_deep_gas:
-        eth += 8.0
-
-    if ethanol_humidity_with_gas and eth >= 40.0:
-        eth += 7.0
-
-    if ipa_clean_like:
-        ipa += 7.0
-
-    if ethanol_water_late_shape:
-        eth += 7.0
-        ipa -= 1.0
-
-    if ipa_water_late_shape and not ethanol_strong and not ethanol_water_late_shape:
+    if ipa_dilute_like:
         ipa += 10.0
         eth -= 3.0
 
-    if ethanol_water_late_soft:
-        eth += 3.0
+    if mixed_water_region:
+        if rs_ipa_water_shape and not ethanol_strong:
+            ipa += 20.0
+            eth -= 7.0
+        if rs_late_loaded_ipa and not ethanol_strong:
+            ipa += 12.0
+            eth -= 4.0
+        if rs_ethanol_water_shape and not rs_ipa_water_shape:
+            eth += 10.0
+            ipa -= 2.0
 
-    if ipa_water_late_soft and not ethanol_water_late_shape:
-        ipa += 6.0
+        if ipa_water_early_like:
+            ipa += 13.0
+            eth -= 4.0
+        if ipa_water_early_hum_like:
+            ipa += 8.0
+            eth -= 2.0
+        if ipa_water_curve_like:
+            ipa += 10.0
+            eth -= 2.5
 
-    if ethanol_water_10s and not ipa_water_10s:
-        eth += 8.0
-        ipa -= 1.0
+        if ethanol_water_early_like:
+            eth += 10.0
+            ipa -= 2.0
+        if ethanol_water_early_hum_like and ethanol_water_early_like:
+            eth += 5.0
+        if ethanol_water_curve_like:
+            eth += 7.0
 
-    if ipa_water_10s and not ethanol_strong:
-        ipa += 10.0
-        eth -= 2.5
+        if gas_drop_2s > -0.50 and gas_drop_4s > -2.10:
+            ipa += 7.0
+        if gas_drop_2s <= -1.10 and gas_drop_4s <= -2.60:
+            eth += 5.0
 
-    if water_10_ready and mixed_water_region and gas_extra_drop_8_10s > -0.25 and late10_gas_per_hum < 0.58 and not ethanol_strong:
-        ipa += 6.0
+        if gas_speed_0_2s > -0.50 and hum_rise_2s < 0.40:
+            ipa += 6.0
+        if gas_speed_0_2s <= -0.80 and hum_rise_4s >= 1.70:
+            eth += 5.0
 
-    if water_10_ready and mixed_water_region and gas_extra_drop_8_10s <= -0.65 and late10_gas_per_hum >= 0.68 and gas_drop_10s <= -4.6:
-        eth += 5.0
+        if mid_2_5_drop > -2.10 and hum_rise_5s < 3.0:
+            ipa += 4.0
+        if mid_2_5_drop <= -2.70 and hum_rise_5s >= 3.0:
+            eth += 4.0
+
+        if duration_sec >= 9.5:
+            if gas_extra_drop_8_10s <= -0.60 and gas_drop_2s <= -0.80 and gas_drop_4s <= -2.30:
+                eth += 2.0
+            elif gas_extra_drop_8_10s <= -0.60:
+                eth += 0.5
+
+            if late10_gas_per_hum >= 0.75 and not ipa_water_early_like:
+                eth += 1.0
+            if late10_gas_per_hum < 0.60 and not ethanol_water_early_like:
+                ipa += 1.5
+
+    else:
+        if hum_max_delta <= 6.0 or hum_gas_ratio <= 0.45:
+            ipa += 6.0
+        if hum_max_delta >= 10.0 and gas_avg_pct <= -9.0 and gas_drop_2s <= -5.0:
+            eth += 7.0
+        if gas_drop_2s <= -6.5 and hum_rise_2s >= 2.0:
+            eth += 5.0
+        if gas_drop_4s <= -9.0 and hum_rise_4s >= 4.0:
+            eth += 5.0
 
     water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
 
     if water_pct and mixed_water_region:
-        water_margin = abs(water_pct["IPA"] - water_pct["ETHANOL"])
-        boost = 8.0 + min(14.0, water_margin * 0.22)
-
-        if water_winner == "IPA":
-            if not ethanol_strong and not ethanol_water_late_shape:
-                if ipa_water_late_shape or ipa_water_late_soft:
+        margin = abs(water_pct["IPA"] - water_pct["ETHANOL"])
+        if margin >= 12.0:
+            boost = min(8.0, 2.0 + margin * 0.18)
+            if water_winner == "IPA":
+                if ipa_water_early_like or ipa_water_curve_like or not ethanol_water_early_like:
                     ipa += boost
-                    eth -= min(4.5, boost * 0.28)
-                else:
-                    ipa += min(5.0, boost * 0.45)
+                    eth -= min(2.0, boost * 0.25)
+            else:
+                if ethanol_water_early_like or ethanol_water_curve_like:
+                    eth += min(5.0, boost * 0.65)
+
+    if mixed_water_region and ipa_water_early_like and ethanol_water_early_like:
+        if gas_drop_2s > -0.95 or hum_rise_2s < 0.45:
+            ipa += 4.0
         else:
-            if ethanol_water_late_shape and not ipa_water_late_shape:
-                eth += min(7.0, boost * 0.60)
-                if not ipa_clean_like:
-                    ipa -= min(2.0, boost * 0.15)
-            elif ethanol_water_late_soft and not ipa_water_late_shape and not ipa_water_late_soft:
-                eth += min(3.0, boost * 0.30)
-    else:
-        if ipa_water_like and not ethanol_strong:
-            ipa += 4.0
-            eth -= 1.5
-
-        if ipa_water_slow_gas and not ethanol_fast_gas:
-            ipa += 4.0
-            eth -= 1.0
-
-        if ipa_water_ratio_like and not ethanol_strong:
-            ipa += 3.0
-
-        if ipa_water_late_humidity and not ethanol_strong:
-            ipa += 2.0
-
-    if gas_drop_2s <= -6.5 and hum_rise_2s >= 2.0:
-        eth += 5.0
-
-    if gas_drop_4s <= -9.0 and hum_rise_4s >= 4.0:
-        eth += 5.0
-
-    if gas_drop_8s > -8.5 and hum_rise_8s >= 9.0 and not ethanol_fast_gas and not water_pct:
-        ipa += 3.0
-
-    if hum_speed_5_8s > hum_speed_0_2s and gas_speed_5_8s > gas_speed_0_2s and hum_max_delta >= 8.0 and not ethanol_strong and not water_pct:
-        ipa += 2.0
-
-    if gas_accel_early_to_late > 0.8 and hum_max_delta >= 8.0 and not ethanol_strong and not water_pct:
-        ipa += 2.0
-
-    if hum_max_delta >= 10.0 and gas_avg_pct <= -9.0 and gas_drop_2s <= -5.0:
-        eth += 6.0
-
-    if hum_max_delta >= 10.0 and gas_avg_pct > -6.0 and gas_drop_2s > -4.0 and not water_pct:
-        ipa += 3.0
-
-    if mixed_water_region and late_gas_per_hum >= 0.72 and gas_late_extra_drop <= -1.0 and gas_drop_8s <= -4.2:
-        eth += 4.0
-
-    if mixed_water_region and late_gas_per_hum < 0.70 and gas_late_extra_drop > -0.90 and not ethanol_strong:
-        ipa += 7.0
-
-    if mixed_water_region and gas_drop_8s <= -4.5 and gas_speed_5_8s <= -0.80 and late_gas_per_hum >= 0.70:
-        eth += 3.0
-
-    if mixed_water_region and gas_drop_8s > -4.0 and gas_speed_5_8s > -0.75 and not ethanol_strong:
-        ipa += 7.0
+            eth += 2.0
 
     temp_avg = to_float(feature.get("temp_avg", 0))
     temp_delta = to_float(feature.get("temp_delta", 0))
@@ -2106,7 +2262,10 @@ class App:
             "check", "id", "timestamp", "label", "group", "train_type", "train_quality", "train_total_rows", "train_clean_rows", "duration_sec", "count",
             "gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct",
             "hum_now_delta", "hum_max_delta", "hum_avg_delta", "hum_end_delta",
-            "gas_drop_2s", "gas_drop_4s", "gas_drop_8s", "gas_drop_10s",
+            "reaction_offset_sec", "rs_gas_drop_2s", "rs_gas_drop_4s", "rs_gas_ratio_2s", "rs_gas_ratio_4s",
+            "gas_drop_2s", "gas_drop_3s", "gas_drop_4s", "gas_drop_5s", "gas_drop_8s", "gas_drop_10s",
+            "hum_rise_2s", "hum_rise_3s", "hum_rise_4s", "hum_rise_5s",
+            "early_1_3_speed", "mid_2_5_speed", "gas_speed_0_2s", "gas_speed_2_5s",
             "gas_speed_5_8s", "gas_speed_8_10s", "gas_extra_drop_8_10s",
             "late10_gas_per_hum", "temp_avg", "press_avg"
         )
@@ -2444,4 +2603,3 @@ if __name__ == "__main__":
     app = App(root)
     root.protocol("WM_DELETE_WINDOW", app.close)
     root.mainloop()
-
