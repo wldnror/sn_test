@@ -974,6 +974,20 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         "rs_mid_hum_2_5_rise": rs_mid_hum_2_5_rise,
         "rs_early_hum_1_3_speed": rs_early_hum_1_3_speed,
         "rs_mid_hum_2_5_speed": rs_mid_hum_2_5_speed,
+        "rs_gas_delta_1_2": rs_gas_drop_2s - rs_gas_drop_1s,
+        "rs_gas_delta_2_3": rs_gas_drop_3s - rs_gas_drop_2s,
+        "rs_gas_delta_3_4": rs_gas_drop_4s - rs_gas_drop_3s,
+        "rs_gas_delta_4_5": rs_gas_drop_5s - rs_gas_drop_4s,
+        "rs_hum_delta_1_2": rs_hum_rise_2s - rs_hum_rise_1s,
+        "rs_hum_delta_2_3": rs_hum_rise_3s - rs_hum_rise_2s,
+        "rs_hum_delta_3_4": rs_hum_rise_4s - rs_hum_rise_3s,
+        "rs_hum_delta_4_5": rs_hum_rise_5s - rs_hum_rise_4s,
+        "rs_ratio_delta_1_2": rs_gas_ratio_2s - rs_gas_ratio_1s,
+        "rs_ratio_delta_2_3": rs_gas_ratio_3s - rs_gas_ratio_2s,
+        "rs_ratio_delta_3_4": rs_gas_ratio_4s - rs_gas_ratio_3s,
+        "rs_ratio_delta_4_5": rs_gas_ratio_5s - rs_gas_ratio_4s,
+        "rs_hum_ratio_delta_2_4": rs_hum_ratio_4s - rs_hum_ratio_2s,
+        "rs_hum_ratio_delta_4_5": rs_hum_ratio_5s - rs_hum_ratio_4s,
         "rs_hum_ratio_2s": rs_hum_ratio_2s,
         "rs_hum_ratio_4s": rs_hum_ratio_4s,
         "rs_hum_ratio_5s": rs_hum_ratio_5s,
@@ -1252,6 +1266,266 @@ def classify_water_mixed_reference(feature):
 
 
 
+
+DYNAMIC_WATER_BASE_FEATURES = [
+    "rs_hum_rise_1s", "rs_hum_rise_2s", "rs_hum_rise_3s", "rs_hum_rise_4s", "rs_hum_rise_5s",
+    "rs_gas_drop_1s", "rs_gas_drop_2s", "rs_gas_drop_3s", "rs_gas_drop_4s", "rs_gas_drop_5s",
+    "rs_gas_ratio_1s", "rs_gas_ratio_2s", "rs_gas_ratio_3s", "rs_gas_ratio_4s", "rs_gas_ratio_5s",
+    "rs_hum_ratio_2s", "rs_hum_ratio_4s", "rs_hum_ratio_5s",
+    "rs_mid_ratio_2_5", "rs_late_ratio_5_10",
+    "rs_early_1_3_drop", "rs_mid_2_5_drop", "rs_early_1_3_speed", "rs_mid_2_5_speed",
+    "rs_early_hum_1_3_rise", "rs_mid_hum_2_5_rise", "rs_early_hum_1_3_speed", "rs_mid_hum_2_5_speed",
+    "early_gas_per_hum_2s", "early_gas_per_hum_4s", "mid_gas_per_hum_5s",
+    "hum_gas_ratio_2s", "hum_gas_ratio_5s",
+]
+
+DYNAMIC_WATER_DERIVED_FEATURES = [
+    "rs_gas_delta_1_2", "rs_gas_delta_2_3", "rs_gas_delta_3_4", "rs_gas_delta_4_5",
+    "rs_hum_delta_1_2", "rs_hum_delta_2_3", "rs_hum_delta_3_4", "rs_hum_delta_4_5",
+    "rs_ratio_delta_1_2", "rs_ratio_delta_2_3", "rs_ratio_delta_3_4", "rs_ratio_delta_4_5",
+    "rs_hum_ratio_delta_2_4", "rs_hum_ratio_delta_4_5",
+]
+
+DYNAMIC_WATER_FEATURES = DYNAMIC_WATER_BASE_FEATURES + DYNAMIC_WATER_DERIVED_FEATURES
+
+
+def dynamic_feature_value(row, key):
+    if key in row and str(row.get(key, "")) != "":
+        return to_float(row.get(key, 0.0))
+
+    def v(k):
+        return to_float(row.get(k, 0.0))
+
+    derived = {
+        "rs_gas_delta_1_2": v("rs_gas_drop_2s") - v("rs_gas_drop_1s"),
+        "rs_gas_delta_2_3": v("rs_gas_drop_3s") - v("rs_gas_drop_2s"),
+        "rs_gas_delta_3_4": v("rs_gas_drop_4s") - v("rs_gas_drop_3s"),
+        "rs_gas_delta_4_5": v("rs_gas_drop_5s") - v("rs_gas_drop_4s"),
+        "rs_hum_delta_1_2": v("rs_hum_rise_2s") - v("rs_hum_rise_1s"),
+        "rs_hum_delta_2_3": v("rs_hum_rise_3s") - v("rs_hum_rise_2s"),
+        "rs_hum_delta_3_4": v("rs_hum_rise_4s") - v("rs_hum_rise_3s"),
+        "rs_hum_delta_4_5": v("rs_hum_rise_5s") - v("rs_hum_rise_4s"),
+        "rs_ratio_delta_1_2": v("rs_gas_ratio_2s") - v("rs_gas_ratio_1s"),
+        "rs_ratio_delta_2_3": v("rs_gas_ratio_3s") - v("rs_gas_ratio_2s"),
+        "rs_ratio_delta_3_4": v("rs_gas_ratio_4s") - v("rs_gas_ratio_3s"),
+        "rs_ratio_delta_4_5": v("rs_gas_ratio_5s") - v("rs_gas_ratio_4s"),
+        "rs_hum_ratio_delta_2_4": v("rs_hum_ratio_4s") - v("rs_hum_ratio_2s"),
+        "rs_hum_ratio_delta_4_5": v("rs_hum_ratio_5s") - v("rs_hum_ratio_4s"),
+    }
+    return derived.get(key, 0.0)
+
+
+def dynamic_feature_base_importance(key):
+    if key.startswith("rs_hum_rise_"):
+        return 1.25
+    if key.startswith("rs_gas_ratio_"):
+        return 1.35
+    if key.startswith("rs_gas_drop_"):
+        return 0.95
+    if "delta" in key:
+        return 1.20
+    if key in ["rs_mid_ratio_2_5", "rs_late_ratio_5_10"]:
+        return 1.30
+    if key.startswith("rs_hum_ratio_"):
+        return 1.05
+    if "speed" in key or "rise" in key or "drop" in key:
+        return 1.00
+    return 0.75
+
+
+def dynamic_feature_floor(key):
+    if "ratio" in key:
+        return 0.035
+    if "hum" in key:
+        return 0.18
+    if "gas" in key:
+        return 0.25
+    return 0.10
+
+
+def water_group_rows():
+    rows = load_csv(SAMPLES_CSV)
+    ipa_rows = []
+    eth_rows = []
+    for r in rows:
+        label = r.get("label", "")
+        if label == "IPA_WATER":
+            ipa_rows.append(r)
+        elif label == "ETHANOL_WATER":
+            eth_rows.append(r)
+    return ipa_rows, eth_rows
+
+
+def group_stats_for_feature(rows, key):
+    vals = []
+    for r in rows:
+        vals.append(dynamic_feature_value(r, key))
+    vals = [x for x in vals if math.isfinite(x)]
+    if not vals:
+        return 0.0, 0.0, 0
+    return mean(vals), stdev(vals), len(vals)
+
+
+def build_dynamic_water_model():
+    ipa_rows, eth_rows = water_group_rows()
+    counts = {"IPA": len(ipa_rows), "ETHANOL": len(eth_rows)}
+    if len(ipa_rows) < 2 or len(eth_rows) < 2:
+        return None, counts
+
+    model = {}
+    for key in DYNAMIC_WATER_FEATURES:
+        ipa_mean, ipa_std, ipa_n = group_stats_for_feature(ipa_rows, key)
+        eth_mean, eth_std, eth_n = group_stats_for_feature(eth_rows, key)
+        if ipa_n <= 0 or eth_n <= 0:
+            continue
+        sep = abs(ipa_mean - eth_mean)
+        spread = ipa_std + eth_std + dynamic_feature_floor(key)
+        raw_weight = sep / spread
+        # 겹치는 feature는 자연스럽게 낮게, 잘 갈리는 feature는 높게.
+        # 너무 큰 하나의 feature가 모든 것을 지배하지 않게 상한을 둔다.
+        weight = max(0.02, min(4.0, raw_weight)) * dynamic_feature_base_importance(key)
+        if sep < dynamic_feature_floor(key) * 0.45:
+            weight *= 0.25
+        model[key] = {
+            "ipa_mean": ipa_mean,
+            "eth_mean": eth_mean,
+            "ipa_std": ipa_std,
+            "eth_std": eth_std,
+            "sep": sep,
+            "spread": spread,
+            "weight": weight,
+        }
+    return {"features": model, "ipa_rows": ipa_rows, "eth_rows": eth_rows}, counts
+
+
+def dynamic_distance_to_center(feature, model, side):
+    total = 0.0
+    wsum = 0.0
+    for key, m in model["features"].items():
+        cur = dynamic_feature_value(feature, key)
+        center = m["ipa_mean"] if side == "IPA" else m["eth_mean"]
+        spread = m["spread"]
+        w = m["weight"]
+        # 거리 자체는 spread로 정규화해서, 단위가 다른 습도/Gas/비율이 같이 비교되게 한다.
+        d = abs(cur - center) / max(dynamic_feature_floor(key), spread)
+        d = min(d, 6.0)
+        total += d * w
+        wsum += w
+    if wsum <= 0:
+        return 999999.0
+    return total / wsum
+
+
+def dynamic_distance_to_row(feature, sample, model):
+    total = 0.0
+    wsum = 0.0
+    for key, m in model["features"].items():
+        cur = dynamic_feature_value(feature, key)
+        sv = dynamic_feature_value(sample, key)
+        spread = m["spread"]
+        w = m["weight"]
+        d = abs(cur - sv) / max(dynamic_feature_floor(key), spread)
+        d = min(d, 6.0)
+        total += d * w
+        wsum += w
+    if wsum <= 0:
+        return 999999.0
+    return total / wsum
+
+
+def pct_from_two_distances(ipa_dist, eth_dist):
+    ipa_score = 1.0 / (1.0 + max(0.0, ipa_dist))
+    eth_score = 1.0 / (1.0 + max(0.0, eth_dist))
+    total = ipa_score + eth_score
+    if total <= 0:
+        return {"IPA": 50.0, "ETHANOL": 50.0}
+    return {
+        "IPA": round(ipa_score / total * 100.0, 1),
+        "ETHANOL": round(eth_score / total * 100.0, 1),
+    }
+
+
+def classify_water_mix_dynamic_distance(feature):
+    model, counts = build_dynamic_water_model()
+    if not model:
+        return None, None, counts, {}
+
+    proto_ipa_dist = dynamic_distance_to_center(feature, model, "IPA")
+    proto_eth_dist = dynamic_distance_to_center(feature, model, "ETHANOL")
+    proto_pct = pct_from_two_distances(proto_ipa_dist, proto_eth_dist)
+
+    ipa_knn = 0.0
+    eth_knn = 0.0
+    ipa_dists = []
+    eth_dists = []
+    for r in model["ipa_rows"]:
+        d = dynamic_distance_to_row(feature, r, model)
+        ipa_dists.append(d)
+    for r in model["eth_rows"]:
+        d = dynamic_distance_to_row(feature, r, model)
+        eth_dists.append(d)
+
+    # 모든 샘플을 보되, 가까운 샘플이 점수를 더 많이 가져간다.
+    # 작은 데이터에서는 평균 중심만 보면 튀는 테스트가 흔들리므로 KNN을 같이 섞는다.
+    for d in sorted(ipa_dists)[:max(1, min(4, len(ipa_dists)) )]:
+        ipa_knn += math.exp(-1.65 * d)
+    for d in sorted(eth_dists)[:max(1, min(4, len(eth_dists)) )]:
+        eth_knn += math.exp(-1.65 * d)
+
+    if ipa_knn + eth_knn > 0:
+        knn_pct = {
+            "IPA": round(ipa_knn / (ipa_knn + eth_knn) * 100.0, 1),
+            "ETHANOL": round(eth_knn / (ipa_knn + eth_knn) * 100.0, 1),
+        }
+    else:
+        knn_pct = {"IPA": 50.0, "ETHANOL": 50.0}
+
+    # 최종: 학습 평균곡선 60%, 가까운 개별 샘플 40%.
+    ipa = proto_pct["IPA"] * 0.60 + knn_pct["IPA"] * 0.40
+    eth = proto_pct["ETHANOL"] * 0.60 + knn_pct["ETHANOL"] * 0.40
+
+    # 학습 데이터에서 실제로 잘 갈리는 상위 feature를 약간 더 반영한다.
+    top = sorted(model["features"].items(), key=lambda kv: kv[1]["weight"], reverse=True)[:10]
+    top_ipa = 0.0
+    top_eth = 0.0
+    top_w = 0.0
+    for key, m in top:
+        cur = dynamic_feature_value(feature, key)
+        di = abs(cur - m["ipa_mean"]) / max(dynamic_feature_floor(key), m["spread"])
+        de = abs(cur - m["eth_mean"]) / max(dynamic_feature_floor(key), m["spread"])
+        w = m["weight"]
+        if di < de:
+            top_ipa += w
+        elif de < di:
+            top_eth += w
+        top_w += w
+    if top_w > 0:
+        ipa += (top_ipa / top_w) * 8.0
+        eth += (top_eth / top_w) * 8.0
+
+    ipa = max(0.0, ipa)
+    eth = max(0.0, eth)
+    total = ipa + eth
+    if total <= 0:
+        out = {"IPA": 50.0, "ETHANOL": 50.0}
+    else:
+        out = {"IPA": round(ipa / total * 100.0, 1), "ETHANOL": round(eth / total * 100.0, 1)}
+    winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
+
+    debug = {
+        "proto_ipa_dist": round(proto_ipa_dist, 4),
+        "proto_eth_dist": round(proto_eth_dist, 4),
+        "proto_ipa_pct": proto_pct["IPA"],
+        "proto_eth_pct": proto_pct["ETHANOL"],
+        "knn_ipa_pct": knn_pct["IPA"],
+        "knn_eth_pct": knn_pct["ETHANOL"],
+        "top_weight_sum": round(top_w, 3),
+    }
+    for idx, (key, m) in enumerate(top[:6], 1):
+        debug[f"top{idx}"] = key
+        debug[f"top{idx}_weight"] = round(m["weight"], 3)
+    return out, winner, counts, debug
+
 def is_water_mix_region(feature):
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
@@ -1307,90 +1581,44 @@ def is_water_mix_region(feature):
 
 
 def classify_water_mix_priority(feature, normal_pct):
-    """물혼합 영역에서는 일반 IPA/에탄올 분류를 거의 믿지 않고,
-    IPA_WATER / ETHANOL_WATER 전용 데이터와 reaction_start 기준 shape로 먼저 판정한다.
+    """물혼합이면 고정 if룰이 아니라, 현재 학습된 IPA_WATER / ETHANOL_WATER에서
+    feature별 분리도를 자동 계산해서 더 가까운 쪽을 고른다.
+    겹치는 feature는 weight가 낮고, 잘 갈리는 시간대/등락폭 feature는 weight가 높다.
     """
+    dynamic_pct, dynamic_winner, dynamic_counts, debug = classify_water_mix_dynamic_distance(feature)
+
+    # 학습 데이터가 부족하면 예전 전용 reference로 fallback.
     water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
+    counts = dynamic_counts if dynamic_counts else water_counts
 
-    rs_hum_rise_2s = to_float(feature.get("rs_hum_rise_2s", feature.get("hum_rise_2s", 0)))
-    rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", feature.get("hum_rise_4s", 0)))
-    rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", feature.get("hum_rise_8s", 0)))
-    rs_gas_ratio_2s = to_float(feature.get("rs_gas_ratio_2s", 0))
-    rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
-    rs_gas_ratio_5s = to_float(feature.get("rs_gas_ratio_5s", 0))
-    rs_mid_ratio_2_5 = to_float(feature.get("rs_mid_ratio_2_5", 0))
-    rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
-    rs_gas_drop_2s = to_float(feature.get("rs_gas_drop_2s", feature.get("gas_drop_2s", 0)))
-    rs_gas_drop_4s = to_float(feature.get("rs_gas_drop_4s", feature.get("gas_drop_4s", 0)))
-    hum_max_delta = to_float(feature.get("hum_max_delta", 0))
-
-    ipa_rule = 0.0
-    eth_rule = 0.0
-
-    # 삭제 후 남긴 데이터 기준: IPA+물은 초반 습도/초반 비율이 낮고 후반 tail이 남는다.
-    if rs_hum_rise_4s < 3.30 and rs_gas_ratio_4s < 0.60:
-        ipa_rule += 5.0
-    if rs_hum_rise_2s < 1.00 and rs_hum_rise_4s < 3.30:
-        ipa_rule += 3.0
-    if rs_gas_ratio_2s < 0.34 and rs_gas_ratio_4s < 0.60:
-        ipa_rule += 3.0
-    if rs_late_ratio_5_10 >= 0.30:
-        ipa_rule += 4.0
-    if rs_mid_ratio_2_5 >= 0.24 and rs_gas_ratio_5s < 0.82:
-        ipa_rule += 1.5
-    if rs_gas_drop_2s > -1.00 and rs_gas_drop_4s > -2.70 and rs_hum_rise_4s < 3.40:
-        ipa_rule += 2.0
-
-    # 에탄올+물은 reaction_start 이후 2~4초에 습도와 gas ratio가 빠르게 커진다.
-    if rs_hum_rise_2s >= 1.00 and rs_hum_rise_4s >= 3.30 and rs_gas_ratio_4s >= 0.60:
-        eth_rule += 6.0
-    if rs_gas_ratio_2s >= 0.34 and rs_gas_ratio_4s >= 0.60 and rs_late_ratio_5_10 < 0.32:
-        eth_rule += 4.0
-    if rs_hum_rise_4s >= 3.70 and rs_gas_ratio_4s >= 0.62:
-        eth_rule += 3.0
-    if rs_gas_drop_2s <= -1.30 and rs_gas_drop_4s <= -3.00 and rs_hum_rise_4s >= 3.20:
-        eth_rule += 2.0
-    if hum_max_delta >= 9.5 and rs_hum_rise_4s >= 3.50 and rs_late_ratio_5_10 < 0.30:
-        eth_rule += 1.5
-
-    if ipa_rule <= 0 and eth_rule <= 0:
-        rule_pct = {"IPA": 50.0, "ETHANOL": 50.0}
+    if dynamic_pct:
+        # 일반 분류는 8%만 섞는다. 물혼합에서는 일반 원액/저농도 학습이 오판을 크게 만들기 때문.
+        ipa = dynamic_pct["IPA"] * 0.92 + float(normal_pct.get("IPA", 50.0)) * 0.08
+        eth = dynamic_pct["ETHANOL"] * 0.92 + float(normal_pct.get("ETHANOL", 50.0)) * 0.08
+    elif water_pct:
+        ipa = water_pct["IPA"] * 0.90 + float(normal_pct.get("IPA", 50.0)) * 0.10
+        eth = water_pct["ETHANOL"] * 0.90 + float(normal_pct.get("ETHANOL", 50.0)) * 0.10
+        debug = {"fallback": "water_reference"}
     else:
-        total_rule = ipa_rule + eth_rule
-        rule_pct = {
-            "IPA": ipa_rule / total_rule * 100.0,
-            "ETHANOL": eth_rule / total_rule * 100.0,
-        }
+        ipa = float(normal_pct.get("IPA", 50.0))
+        eth = float(normal_pct.get("ETHANOL", 50.0))
+        debug = {"fallback": "normal"}
 
-    # 물혼합 전용 학습 데이터가 있으면 일반 판정보다 훨씬 우선한다.
-    # normal_pct는 15%만 섞어서 순수계열 학습값이 완전히 무시되진 않게 한다.
-    if water_pct:
-        ipa = water_pct["IPA"] * 0.55 + rule_pct["IPA"] * 0.30 + float(normal_pct.get("IPA", 50.0)) * 0.15
-        eth = water_pct["ETHANOL"] * 0.55 + rule_pct["ETHANOL"] * 0.30 + float(normal_pct.get("ETHANOL", 50.0)) * 0.15
-    else:
-        ipa = rule_pct["IPA"] * 0.75 + float(normal_pct.get("IPA", 50.0)) * 0.25
-        eth = rule_pct["ETHANOL"] * 0.75 + float(normal_pct.get("ETHANOL", 50.0)) * 0.25
-
-    # 룰이 매우 강하면 최종을 그쪽으로 더 당긴다.
-    if ipa_rule - eth_rule >= 4.0:
-        ipa += 10.0
-        eth -= 4.0
-    elif eth_rule - ipa_rule >= 4.0:
-        eth += 10.0
-        ipa -= 4.0
-
+    # 무조건 둘 중 하나로 분리한다. 애매 판정은 하지 않는다.
     ipa = max(0.0, ipa)
     eth = max(0.0, eth)
     total = ipa + eth
     if total <= 0:
-        return {"IPA": 50.0, "ETHANOL": 50.0}, "IPA", water_pct, rule_pct, water_counts
+        out = {"IPA": 50.0, "ETHANOL": 50.0}
+    else:
+        out = {"IPA": round(ipa / total * 100.0, 1), "ETHANOL": round(eth / total * 100.0, 1)}
 
-    out = {
-        "IPA": round(ipa / total * 100.0, 1),
-        "ETHANOL": round(eth / total * 100.0, 1),
-    }
     winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
-    return out, winner, water_pct, rule_pct, water_counts
+    rule_pct = {
+        "IPA": dynamic_pct["IPA"] if dynamic_pct else (water_pct["IPA"] if water_pct else out["IPA"]),
+        "ETHANOL": dynamic_pct["ETHANOL"] if dynamic_pct else (water_pct["ETHANOL"] if water_pct else out["ETHANOL"]),
+    }
+    return out, winner, dynamic_pct or water_pct, rule_pct, counts
 
 def adjust_for_water_mixed_ipa(feature, pct):
     ipa = float(pct.get("IPA", 0.0))
@@ -2324,10 +2552,10 @@ class App:
             if water_mix_region:
                 pct, winner, water_pct, rule_pct, water_counts = classify_water_mix_priority(feature, pct)
                 detail_scores = {
-                    "WATER_REF_IPA": water_pct["IPA"] if water_pct else 0.0,
-                    "WATER_REF_ETHANOL": water_pct["ETHANOL"] if water_pct else 0.0,
-                    "RULE_IPA": rule_pct["IPA"],
-                    "RULE_ETHANOL": rule_pct["ETHANOL"],
+                    "DYNAMIC_IPA": water_pct["IPA"] if water_pct else 0.0,
+                    "DYNAMIC_ETHANOL": water_pct["ETHANOL"] if water_pct else 0.0,
+                    "MODEL_IPA": rule_pct["IPA"],
+                    "MODEL_ETHANOL": rule_pct["ETHANOL"],
                 }
             else:
                 pct, winner = adjust_for_water_mixed_ipa(feature, pct)
