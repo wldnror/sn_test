@@ -1467,8 +1467,14 @@ def adjust_for_water_mixed_ipa(feature, pct):
             ipa += 22.0
             eth -= 10.0
         elif rs_hum_rise_2s > 1.03:
-            eth += 20.0
-            ipa -= 8.0
+            # [수정5] hum_gas_ratio로 재확인: ETH_WATER 실데이터 최솟값=0.906
+            # rs_hum_rise가 높아도 hum_gas_ratio < 0.89면 IPA_WATER
+            if hum_gas_ratio < 0.89:
+                ipa += 15.0
+                eth -= 5.0
+            else:
+                eth += 20.0
+                ipa -= 8.0
         if ipa_water_strong and not ethanol_strong:
             ipa += 22.0
             eth -= 8.0
