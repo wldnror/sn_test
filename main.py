@@ -1262,140 +1262,130 @@ def adjust_for_water_mixed_ipa(feature, pct):
     gas_end_pct = to_float(feature.get("gas_end_pct", 0))
     hum_gas_ratio = to_float(feature.get("hum_gas_ratio", 0))
 
-    gas_drop_1s = to_float(feature.get("gas_drop_1s", 0))
     gas_drop_2s = to_float(feature.get("gas_drop_2s", 0))
-    gas_drop_3s = to_float(feature.get("gas_drop_3s", gas_drop_2s))
     gas_drop_4s = to_float(feature.get("gas_drop_4s", 0))
-    gas_drop_5s = to_float(feature.get("gas_drop_5s", gas_drop_4s))
     gas_drop_8s = to_float(feature.get("gas_drop_8s", 0))
     gas_drop_10s = to_float(feature.get("gas_drop_10s", gas_drop_8s))
-
-    hum_rise_1s = to_float(feature.get("hum_rise_1s", 0))
     hum_rise_2s = to_float(feature.get("hum_rise_2s", 0))
-    hum_rise_3s = to_float(feature.get("hum_rise_3s", hum_rise_2s))
     hum_rise_4s = to_float(feature.get("hum_rise_4s", 0))
-    hum_rise_5s = to_float(feature.get("hum_rise_5s", hum_rise_4s))
     hum_rise_8s = to_float(feature.get("hum_rise_8s", 0))
     hum_rise_10s = to_float(feature.get("hum_rise_10s", hum_rise_8s))
-
     gas_speed_0_2s = to_float(feature.get("gas_speed_0_2s", 0))
-    gas_speed_2_5s = to_float(feature.get("gas_speed_2_5s", 0))
-    gas_speed_5_8s = to_float(feature.get("gas_speed_5_8s", 0))
-    gas_speed_8_10s = to_float(feature.get("gas_speed_8_10s", 0))
 
-    early_1_3_drop = to_float(feature.get("early_1_3_drop", gas_drop_3s - gas_drop_1s))
-    mid_2_5_drop = to_float(feature.get("mid_2_5_drop", gas_drop_5s - gas_drop_2s))
-    early_1_3_speed = to_float(feature.get("early_1_3_speed", early_1_3_drop / 2.0))
-    mid_2_5_speed = to_float(feature.get("mid_2_5_speed", mid_2_5_drop / 3.0))
-    early_hum_1_3_rise = to_float(feature.get("early_hum_1_3_rise", hum_rise_3s - hum_rise_1s))
-    mid_hum_2_5_rise = to_float(feature.get("mid_hum_2_5_rise", hum_rise_5s - hum_rise_2s))
-
-    gas_extra_drop_8_10s = to_float(feature.get("gas_extra_drop_8_10s", gas_drop_10s - gas_drop_8s))
-    late10_gas_per_hum = to_float(feature.get("late10_gas_per_hum", abs(gas_drop_10s) / max(0.1, hum_rise_10s)))
-    duration_sec = to_float(feature.get("duration_sec", 0))
     rs_gas_drop_2s = to_float(feature.get("rs_gas_drop_2s", gas_drop_2s))
     rs_gas_drop_4s = to_float(feature.get("rs_gas_drop_4s", gas_drop_4s))
-    rs_gas_drop_5s = to_float(feature.get("rs_gas_drop_5s", gas_drop_5s))
+    rs_gas_drop_5s = to_float(feature.get("rs_gas_drop_5s", gas_drop_4s))
+    rs_gas_drop_8s = to_float(feature.get("rs_gas_drop_8s", gas_drop_8s))
+    rs_gas_drop_10s = to_float(feature.get("rs_gas_drop_10s", gas_drop_10s))
     rs_gas_speed_0_2s = to_float(feature.get("rs_gas_speed_0_2s", gas_speed_0_2s))
-    rs_early_1_3_speed = to_float(feature.get("rs_early_1_3_speed", early_1_3_speed))
-    rs_mid_2_5_speed = to_float(feature.get("rs_mid_2_5_speed", mid_2_5_speed))
-    rs_gas_ratio_2s = to_float(feature.get("rs_gas_ratio_2s", 0))
-    rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
-    rs_mid_ratio_2_5 = to_float(feature.get("rs_mid_ratio_2_5", 0))
-    rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
+    rs_early_1_3_speed = to_float(feature.get("rs_early_1_3_speed", 0))
+    rs_mid_2_5_speed = to_float(feature.get("rs_mid_2_5_speed", 0))
+
     rs_hum_rise_2s = to_float(feature.get("rs_hum_rise_2s", hum_rise_2s))
     rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", hum_rise_4s))
+    rs_hum_rise_5s = to_float(feature.get("rs_hum_rise_5s", hum_rise_4s))
+    rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", hum_rise_8s))
+    rs_hum_rise_10s = to_float(feature.get("rs_hum_rise_10s", hum_rise_10s))
 
+    rs_gas_ratio_2s = to_float(feature.get("rs_gas_ratio_2s", 0))
+    rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
+    rs_gas_ratio_5s = to_float(feature.get("rs_gas_ratio_5s", 0))
+    rs_mid_ratio_2_5 = to_float(feature.get("rs_mid_ratio_2_5", 0))
+    rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
+    rs_hum_ratio_2s = to_float(feature.get("rs_hum_ratio_2s", 0))
+    rs_hum_ratio_4s = to_float(feature.get("rs_hum_ratio_4s", 0))
+
+    reaction_offset_sec = to_float(feature.get("reaction_offset_sec", 0))
+    reaction_duration_sec = to_float(feature.get("reaction_duration_sec", 0))
+    duration_sec = to_float(feature.get("duration_sec", 0))
+
+    # 물혼합은 원액/희석 IPA/에탄올보다 습도 상승이 크고, Gas 절대하락은 중간 영역에 들어온다.
+    # 새 기준에서는 절대시간 gas_drop보다 reaction_start 기준 rs_*와 normalized ratio를 우선한다.
     mixed_water_region = (
-        hum_max_delta >= 6.0
-        and hum_rise_8s >= 4.5
-        and abs(gas_min_pct) <= 13.0
-        and abs(gas_avg_pct) <= 8.0
+        hum_max_delta >= 5.8
+        and rs_hum_rise_8s >= 4.2
+        and abs(gas_min_pct) <= 14.5
+        and abs(gas_avg_pct) <= 9.0
     )
 
+    # 강한 원액 에탄올류는 물혼합 보정이 IPA 쪽으로 끌지 않도록 보호한다.
     ethanol_strong = (
         hum_max_delta >= 8.5
         and abs(gas_min_pct) >= 13.0
         and gas_avg_pct <= -7.5
-        and gas_drop_2s <= -3.5
-        and gas_drop_4s <= -5.5
+        and rs_gas_drop_2s <= -3.0
+        and rs_gas_drop_4s <= -5.0
     )
 
+    # IPA 저농도/건조 반응은 물혼합으로 착각하지 않게 보호한다.
     ipa_dilute_like = (
         hum_end_delta <= -0.8
         or hum_avg_delta <= -0.5
         or hum_max_delta < 5.0
     )
 
-    ipa_water_early_like = (
+    # 삭제 후 남긴 물혼합 데이터 기준 핵심:
+    # IPA+물 = 초반 습도 상승과 초반 Gas 비율이 낮고, 후반 5~10초 비율이 남는다.
+    ipa_water_core = (
         mixed_water_region
-        and gas_drop_2s > -0.70
-        and gas_drop_4s > -2.20
-        and gas_speed_0_2s > -0.60
+        and rs_hum_rise_4s < 3.30
+        and rs_gas_ratio_4s < 0.60
     )
 
-    ipa_water_early_hum_like = (
+    ipa_water_strong = (
         mixed_water_region
-        and hum_rise_2s < 0.35
-        and hum_rise_4s < 1.70
+        and rs_hum_rise_2s < 1.00
+        and rs_hum_rise_4s < 3.30
+        and rs_gas_ratio_2s < 0.34
+        and rs_gas_ratio_4s < 0.60
     )
 
-    ipa_water_curve_like = (
+    ipa_water_tail = (
         mixed_water_region
-        and early_1_3_speed > -0.55
-        and mid_2_5_speed > -0.85
-        and early_hum_1_3_rise < 1.20
+        and rs_late_ratio_5_10 >= 0.30
+        and rs_gas_ratio_4s < 0.64
+        and rs_hum_rise_4s < 3.60
     )
 
-    ethanol_water_early_like = (
+    ipa_water_slow_shape = (
         mixed_water_region
-        and hum_max_delta >= 7.0
-        and gas_drop_2s <= -0.80
-        and gas_drop_4s <= -2.30
-        and gas_speed_0_2s <= -0.65
+        and rs_gas_speed_0_2s > -0.85
+        and rs_early_1_3_speed > -0.85
+        and rs_mid_2_5_speed > -1.05
+        and rs_gas_ratio_5s < 0.78
     )
 
-    ethanol_water_early_hum_like = (
+    # 에탄올+물 = reaction_start 이후 2~4초 습도상승이 빠르고,
+    # 4초 안에 전체 Gas 반응의 큰 비율이 이미 나온다.
+    ethanol_water_core = (
         mixed_water_region
-        and hum_rise_2s >= 0.35
-        and hum_rise_4s >= 1.60
+        and rs_hum_rise_4s >= 3.30
+        and rs_gas_ratio_4s >= 0.60
     )
 
-    ethanol_water_curve_like = (
+    ethanol_water_strong = (
         mixed_water_region
-        and early_1_3_speed <= -0.60
-        and mid_2_5_speed <= -0.85
-        and gas_drop_5s <= -3.0
+        and rs_hum_rise_2s >= 1.00
+        and rs_hum_rise_4s >= 3.30
+        and rs_gas_ratio_4s >= 0.60
     )
 
-    rs_ipa_water_shape = (
+    ethanol_water_fast_front = (
         mixed_water_region
-        and rs_gas_drop_2s > -0.85
-        and rs_gas_drop_4s > -2.35
-        and rs_gas_speed_0_2s > -0.75
-        and rs_early_1_3_speed > -0.70
-        and rs_mid_2_5_speed > -0.95
-        and rs_gas_ratio_2s < 0.24
-        and rs_gas_ratio_4s < 0.55
+        and rs_gas_ratio_2s >= 0.34
+        and rs_gas_ratio_4s >= 0.60
+        and rs_late_ratio_5_10 < 0.32
     )
 
-    rs_ethanol_water_shape = (
+    ethanol_water_hum_fast = (
         mixed_water_region
-        and rs_gas_drop_2s <= -0.85
-        and rs_gas_drop_4s <= -2.35
-        and rs_gas_speed_0_2s <= -0.75
-        and rs_gas_ratio_2s >= 0.24
-        and rs_gas_ratio_4s >= 0.50
+        and rs_hum_ratio_2s >= 0.18
+        and rs_hum_ratio_4s >= 0.42
+        and rs_hum_rise_4s >= 3.30
     )
 
-    rs_late_loaded_ipa = (
-        mixed_water_region
-        and rs_gas_ratio_2s < 0.22
-        and rs_gas_ratio_4s < 0.55
-        and rs_mid_ratio_2_5 >= 0.18
-        and rs_late_ratio_5_10 >= 0.25
-    )
-
+    # 경계값에서 어느 쪽이 더 강한지 점수화한다.
+    # 한 조건만으로 뒤집지 않고 여러 조건이 같이 맞을 때 크게 보정한다.
     if ethanol_strong:
         eth += 14.0
 
@@ -1404,59 +1394,56 @@ def adjust_for_water_mixed_ipa(feature, pct):
         eth -= 3.0
 
     if mixed_water_region:
-        if rs_ipa_water_shape and not ethanol_strong:
-            ipa += 20.0
-            eth -= 7.0
-        if rs_late_loaded_ipa and not ethanol_strong:
+        if ipa_water_strong and not ethanol_strong:
+            ipa += 22.0
+            eth -= 8.0
+        elif ipa_water_core and not ethanol_strong:
+            ipa += 15.0
+            eth -= 5.0
+
+        if ipa_water_tail and not ethanol_water_strong and not ethanol_strong:
             ipa += 12.0
             eth -= 4.0
-        if rs_ethanol_water_shape and not rs_ipa_water_shape:
-            eth += 10.0
-            ipa -= 2.0
 
-        if ipa_water_early_like:
-            ipa += 13.0
-            eth -= 4.0
-        if ipa_water_early_hum_like:
-            ipa += 8.0
-            eth -= 2.0
-        if ipa_water_curve_like:
-            ipa += 10.0
-            eth -= 2.5
-
-        if ethanol_water_early_like:
-            eth += 10.0
-            ipa -= 2.0
-        if ethanol_water_early_hum_like and ethanol_water_early_like:
-            eth += 5.0
-        if ethanol_water_curve_like:
-            eth += 7.0
-
-        if gas_drop_2s > -0.50 and gas_drop_4s > -2.10:
+        if ipa_water_slow_shape and not ethanol_water_strong and not ethanol_strong:
             ipa += 7.0
-        if gas_drop_2s <= -1.10 and gas_drop_4s <= -2.60:
-            eth += 5.0
+            eth -= 2.0
 
-        if gas_speed_0_2s > -0.50 and hum_rise_2s < 0.40:
-            ipa += 6.0
-        if gas_speed_0_2s <= -0.80 and hum_rise_4s >= 1.70:
-            eth += 5.0
+        if ethanol_water_strong and not ipa_water_strong:
+            eth += 18.0
+            ipa -= 5.0
+        elif ethanol_water_core and not ipa_water_core:
+            eth += 12.0
+            ipa -= 3.0
 
-        if mid_2_5_drop > -2.10 and hum_rise_5s < 3.0:
-            ipa += 4.0
-        if mid_2_5_drop <= -2.70 and hum_rise_5s >= 3.0:
+        if ethanol_water_fast_front and not ipa_water_tail:
+            eth += 8.0
+            ipa -= 2.0
+
+        if ethanol_water_hum_fast and not ipa_water_strong:
+            eth += 6.0
+
+        # 단순 절대 gas_drop은 보조로만 사용한다. 후반 8~10초 절대값은 거의 사용하지 않는다.
+        if rs_gas_drop_2s > -0.80 and rs_gas_drop_4s > -2.40 and rs_hum_rise_4s < 3.30:
+            ipa += 5.0
+        if rs_gas_drop_2s <= -1.20 and rs_gas_drop_4s <= -2.80 and rs_hum_rise_4s >= 3.30:
             eth += 4.0
 
-        if duration_sec >= 9.5:
-            if gas_extra_drop_8_10s <= -0.60 and gas_drop_2s <= -0.80 and gas_drop_4s <= -2.30:
-                eth += 2.0
-            elif gas_extra_drop_8_10s <= -0.60:
-                eth += 0.5
+        # 사람이 가스를 넣는 양 차이는 ratio로 보정한다.
+        if rs_gas_ratio_4s < 0.56 and rs_late_ratio_5_10 >= 0.32 and not ethanol_water_strong:
+            ipa += 8.0
+        if rs_gas_ratio_4s >= 0.66 and rs_late_ratio_5_10 < 0.30 and not ipa_water_strong:
+            eth += 7.0
 
-            if late10_gas_per_hum >= 0.75 and not ipa_water_early_like:
+        # reaction_start가 너무 늦거나 짧으면 과신하지 않게 보정폭을 줄이는 방향으로 살짝 중앙으로 당김.
+        unreliable_rs = reaction_offset_sec > 4.0 or (reaction_duration_sec > 0 and reaction_duration_sec < 5.5)
+        if unreliable_rs:
+            if ipa > eth:
+                ipa -= 3.0
                 eth += 1.0
-            if late10_gas_per_hum < 0.60 and not ethanol_water_early_like:
-                ipa += 1.5
+            else:
+                eth -= 3.0
+                ipa += 1.0
 
     else:
         if hum_max_delta <= 6.0 or hum_gas_ratio <= 0.45:
@@ -1468,25 +1455,27 @@ def adjust_for_water_mixed_ipa(feature, pct):
         if gas_drop_4s <= -9.0 and hum_rise_4s >= 4.0:
             eth += 5.0
 
+    # 물혼합 전용 학습 데이터가 있으면 참조하되, rs 조건과 충돌하면 약하게만 반영한다.
     water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
 
     if water_pct and mixed_water_region:
         margin = abs(water_pct["IPA"] - water_pct["ETHANOL"])
-        if margin >= 12.0:
-            boost = min(8.0, 2.0 + margin * 0.18)
+        if margin >= 10.0:
+            boost = min(7.0, 1.5 + margin * 0.16)
             if water_winner == "IPA":
-                if ipa_water_early_like or ipa_water_curve_like or not ethanol_water_early_like:
+                if ipa_water_core or ipa_water_tail or not ethanol_water_strong:
                     ipa += boost
                     eth -= min(2.0, boost * 0.25)
             else:
-                if ethanol_water_early_like or ethanol_water_curve_like:
+                if ethanol_water_core or ethanol_water_fast_front:
                     eth += min(5.0, boost * 0.65)
 
-    if mixed_water_region and ipa_water_early_like and ethanol_water_early_like:
-        if gas_drop_2s > -0.95 or hum_rise_2s < 0.45:
-            ipa += 4.0
+    # 충돌 구간 처리: rs_hum과 rs_gas_ratio가 서로 애매하면 late tail을 우선한다.
+    if mixed_water_region and ipa_water_core and ethanol_water_core:
+        if rs_late_ratio_5_10 >= 0.32:
+            ipa += 5.0
         else:
-            eth += 2.0
+            eth += 3.0
 
     temp_avg = to_float(feature.get("temp_avg", 0))
     temp_delta = to_float(feature.get("temp_delta", 0))
