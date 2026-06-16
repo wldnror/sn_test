@@ -1250,6 +1250,148 @@ def classify_water_mixed_reference(feature):
     winner = "IPA" if pct["IPA"] >= pct["ETHANOL"] else "ETHANOL"
     return pct, winner, group_counts
 
+
+
+def is_water_mix_region(feature):
+    hum_max_delta = to_float(feature.get("hum_max_delta", 0))
+    hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
+    hum_end_delta = to_float(feature.get("hum_end_delta", 0))
+    gas_min_pct = to_float(feature.get("gas_min_pct", 0))
+    gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
+    gas_drop_8s = to_float(feature.get("gas_drop_8s", 0))
+
+    rs_hum_rise_2s = to_float(feature.get("rs_hum_rise_2s", feature.get("hum_rise_2s", 0)))
+    rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", feature.get("hum_rise_4s", 0)))
+    rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", feature.get("hum_rise_8s", 0)))
+    rs_gas_ratio_2s = to_float(feature.get("rs_gas_ratio_2s", 0))
+    rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
+    rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
+    reaction_duration_sec = to_float(feature.get("reaction_duration_sec", 0))
+
+    dry_or_dilute_ipa = (
+        hum_end_delta <= -0.8
+        or hum_avg_delta <= -0.5
+        or hum_max_delta < 4.8
+    )
+
+    too_strong_original_like = (
+        abs(gas_min_pct) >= 18.0
+        and gas_avg_pct <= -10.5
+        and gas_drop_8s <= -9.0
+        and hum_max_delta >= 9.5
+    )
+
+    water_humidity_shape = (
+        hum_max_delta >= 5.5
+        and (
+            rs_hum_rise_4s >= 1.4
+            or rs_hum_rise_8s >= 4.0
+            or hum_avg_delta >= 2.0
+        )
+    )
+
+    gas_in_water_mix_range = (
+        abs(gas_min_pct) <= 18.0
+        and abs(gas_avg_pct) <= 11.0
+    )
+
+    rs_shape_available = (
+        reaction_duration_sec <= 0
+        or reaction_duration_sec >= 4.5
+        or rs_gas_ratio_4s > 0
+        or rs_late_ratio_5_10 > 0
+        or rs_hum_rise_4s > 0
+    )
+
+    return water_humidity_shape and gas_in_water_mix_range and rs_shape_available and not dry_or_dilute_ipa and not too_strong_original_like
+
+
+def classify_water_mix_priority(feature, normal_pct):
+    """물혼합 영역에서는 일반 IPA/에탄올 분류를 거의 믿지 않고,
+    IPA_WATER / ETHANOL_WATER 전용 데이터와 reaction_start 기준 shape로 먼저 판정한다.
+    """
+    water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
+
+    rs_hum_rise_2s = to_float(feature.get("rs_hum_rise_2s", feature.get("hum_rise_2s", 0)))
+    rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", feature.get("hum_rise_4s", 0)))
+    rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", feature.get("hum_rise_8s", 0)))
+    rs_gas_ratio_2s = to_float(feature.get("rs_gas_ratio_2s", 0))
+    rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
+    rs_gas_ratio_5s = to_float(feature.get("rs_gas_ratio_5s", 0))
+    rs_mid_ratio_2_5 = to_float(feature.get("rs_mid_ratio_2_5", 0))
+    rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
+    rs_gas_drop_2s = to_float(feature.get("rs_gas_drop_2s", feature.get("gas_drop_2s", 0)))
+    rs_gas_drop_4s = to_float(feature.get("rs_gas_drop_4s", feature.get("gas_drop_4s", 0)))
+    hum_max_delta = to_float(feature.get("hum_max_delta", 0))
+
+    ipa_rule = 0.0
+    eth_rule = 0.0
+
+    # 삭제 후 남긴 데이터 기준: IPA+물은 초반 습도/초반 비율이 낮고 후반 tail이 남는다.
+    if rs_hum_rise_4s < 3.30 and rs_gas_ratio_4s < 0.60:
+        ipa_rule += 5.0
+    if rs_hum_rise_2s < 1.00 and rs_hum_rise_4s < 3.30:
+        ipa_rule += 3.0
+    if rs_gas_ratio_2s < 0.34 and rs_gas_ratio_4s < 0.60:
+        ipa_rule += 3.0
+    if rs_late_ratio_5_10 >= 0.30:
+        ipa_rule += 4.0
+    if rs_mid_ratio_2_5 >= 0.24 and rs_gas_ratio_5s < 0.82:
+        ipa_rule += 1.5
+    if rs_gas_drop_2s > -1.00 and rs_gas_drop_4s > -2.70 and rs_hum_rise_4s < 3.40:
+        ipa_rule += 2.0
+
+    # 에탄올+물은 reaction_start 이후 2~4초에 습도와 gas ratio가 빠르게 커진다.
+    if rs_hum_rise_2s >= 1.00 and rs_hum_rise_4s >= 3.30 and rs_gas_ratio_4s >= 0.60:
+        eth_rule += 6.0
+    if rs_gas_ratio_2s >= 0.34 and rs_gas_ratio_4s >= 0.60 and rs_late_ratio_5_10 < 0.32:
+        eth_rule += 4.0
+    if rs_hum_rise_4s >= 3.70 and rs_gas_ratio_4s >= 0.62:
+        eth_rule += 3.0
+    if rs_gas_drop_2s <= -1.30 and rs_gas_drop_4s <= -3.00 and rs_hum_rise_4s >= 3.20:
+        eth_rule += 2.0
+    if hum_max_delta >= 9.5 and rs_hum_rise_4s >= 3.50 and rs_late_ratio_5_10 < 0.30:
+        eth_rule += 1.5
+
+    if ipa_rule <= 0 and eth_rule <= 0:
+        rule_pct = {"IPA": 50.0, "ETHANOL": 50.0}
+    else:
+        total_rule = ipa_rule + eth_rule
+        rule_pct = {
+            "IPA": ipa_rule / total_rule * 100.0,
+            "ETHANOL": eth_rule / total_rule * 100.0,
+        }
+
+    # 물혼합 전용 학습 데이터가 있으면 일반 판정보다 훨씬 우선한다.
+    # normal_pct는 15%만 섞어서 순수계열 학습값이 완전히 무시되진 않게 한다.
+    if water_pct:
+        ipa = water_pct["IPA"] * 0.55 + rule_pct["IPA"] * 0.30 + float(normal_pct.get("IPA", 50.0)) * 0.15
+        eth = water_pct["ETHANOL"] * 0.55 + rule_pct["ETHANOL"] * 0.30 + float(normal_pct.get("ETHANOL", 50.0)) * 0.15
+    else:
+        ipa = rule_pct["IPA"] * 0.75 + float(normal_pct.get("IPA", 50.0)) * 0.25
+        eth = rule_pct["ETHANOL"] * 0.75 + float(normal_pct.get("ETHANOL", 50.0)) * 0.25
+
+    # 룰이 매우 강하면 최종을 그쪽으로 더 당긴다.
+    if ipa_rule - eth_rule >= 4.0:
+        ipa += 10.0
+        eth -= 4.0
+    elif eth_rule - ipa_rule >= 4.0:
+        eth += 10.0
+        ipa -= 4.0
+
+    ipa = max(0.0, ipa)
+    eth = max(0.0, eth)
+    total = ipa + eth
+    if total <= 0:
+        return {"IPA": 50.0, "ETHANOL": 50.0}, "IPA", water_pct, rule_pct, water_counts
+
+    out = {
+        "IPA": round(ipa / total * 100.0, 1),
+        "ETHANOL": round(eth / total * 100.0, 1),
+    }
+    winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
+    return out, winner, water_pct, rule_pct, water_counts
+
 def adjust_for_water_mixed_ipa(feature, pct):
     ipa = float(pct.get("IPA", 0.0))
     eth = float(pct.get("ETHANOL", 0.0))
@@ -1508,44 +1650,26 @@ def adjust_for_water_mixed_ipa(feature, pct):
     return new_pct, winner
 
 def is_water_mix_suspect(feature, pct):
+    if is_water_mix_region(feature):
+        return True
+
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
-    hum_end_delta = to_float(feature.get("hum_end_delta", 0))
-    hum_rise_8s = to_float(feature.get("hum_rise_8s", 0))
     gas_min_pct = to_float(feature.get("gas_min_pct", 0))
     gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
-    gas_drop_2s = to_float(feature.get("gas_drop_2s", 0))
-    gas_drop_8s = to_float(feature.get("gas_drop_8s", 0))
-    gas_speed_0_2s = to_float(feature.get("gas_speed_0_2s", 0))
-
+    rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", feature.get("hum_rise_4s", 0)))
+    rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", feature.get("hum_rise_8s", 0)))
     score_gap = abs(float(pct.get("IPA", 0.0)) - float(pct.get("ETHANOL", 0.0)))
 
-    ipa_dilute_like = (
-        hum_end_delta <= -0.8
-        or hum_avg_delta <= -0.5
-        or hum_max_delta < 5.0
+    loose_water_like = (
+        hum_max_delta >= 5.8
+        and hum_avg_delta >= 1.5
+        and (rs_hum_rise_4s >= 1.5 or rs_hum_rise_8s >= 4.0)
+        and abs(gas_min_pct) <= 18.0
+        and abs(gas_avg_pct) <= 11.0
     )
 
-    ethanol_strong = (
-        hum_max_delta >= 8.0
-        and abs(gas_min_pct) >= 13.0
-        and gas_avg_pct <= -7.0
-        and gas_drop_8s <= -5.0
-        and gas_drop_2s <= -4.5
-        and gas_speed_0_2s <= -2.0
-    )
-
-    water_mix_like = (
-        hum_max_delta >= 8.0
-        and hum_rise_8s >= 6.5
-        and abs(gas_min_pct) <= 12.5
-        and abs(gas_avg_pct) <= 7.0
-    )
-
-    if ipa_dilute_like or ethanol_strong:
-        return False
-
-    return water_mix_like and score_gap <= 30.0
+    return loose_water_like and score_gap <= 55.0
 
 def is_water_only_reaction(feature):
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
@@ -2186,17 +2310,27 @@ class App:
                 return
 
             water_mix_suspect = is_water_mix_suspect(feature, pct)
+            water_mix_region = is_water_mix_region(feature)
 
             if water_mix_suspect and elapsed < WATER_MIX_DECISION_DELAY_SEC:
                 self.safe_ui(
                     self.cards["현재상태"].config,
-                    text=f"물혼합 의심 {elapsed:.1f}/{WATER_MIX_DECISION_DELAY_SEC:.1f}s",
+                    text=f"물혼합 전용분석 {elapsed:.1f}/{WATER_MIX_DECISION_DELAY_SEC:.1f}s",
                     fg=self.orange,
                 )
-                self.last_state_text = "물혼합 의심"
+                self.last_state_text = "물혼합 전용분석"
                 return
 
-            pct, winner = adjust_for_water_mixed_ipa(feature, pct)
+            if water_mix_region:
+                pct, winner, water_pct, rule_pct, water_counts = classify_water_mix_priority(feature, pct)
+                detail_scores = {
+                    "WATER_REF_IPA": water_pct["IPA"] if water_pct else 0.0,
+                    "WATER_REF_ETHANOL": water_pct["ETHANOL"] if water_pct else 0.0,
+                    "RULE_IPA": rule_pct["IPA"],
+                    "RULE_ETHANOL": rule_pct["ETHANOL"],
+                }
+            else:
+                pct, winner = adjust_for_water_mixed_ipa(feature, pct)
 
             self.result_winner = winner
             self.result_pct = pct
