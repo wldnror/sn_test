@@ -6,39 +6,29 @@ import time
 import threading
 from datetime import datetime
 from collections import deque
-
 import spidev
 import tkinter as tk
 from tkinter import ttk, messagebox
-
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-
 DATA_DIR = "bme688_data"
 os.makedirs(DATA_DIR, exist_ok=True)
-
 SAMPLES_CSV = os.path.join(DATA_DIR, "samples_live.csv")
 RAW_CSV = os.path.join(DATA_DIR, "raw_log_live.csv")
 AIR_MEMORY_CSV = os.path.join(DATA_DIR, "air_memory.csv")
 AIR_HISTORY_CSV = os.path.join(DATA_DIR, "air_history.csv")
-
 MAX_RAW_ROWS = 100000
-
 MEASURE_SLEEP_SEC = 0.20
 LOOP_SLEEP_SEC = 0.005
 UI_UPDATE_MS = 200
 STATUS_UPDATE_SEC = 1.0
-
 HEATER_NAME = "H1_LOW_FIXED"
 HEATER_VALUE = 0x45
-
 ROLLING_WINDOW_SEC = 14.0
 MIN_CLASSIFY_ROWS = 4
-
 ACTIVE_GAS_DROP_PCT = -3.0
 ACTIVE_HUM_RISE = 0.7
 ACTIVE_HUM_NEED_GAS_DROP_PCT = -1.5
@@ -47,50 +37,39 @@ WATER_ONLY_GAS_MIN_ABS_PCT = 5.0
 WATER_ONLY_GAS_AVG_ABS_PCT = 3.5
 WATER_ONLY_GAS_SPEED_0_2S = -0.9
 WATER_ONLY_GAS_DROP_2S = -2.0
-
 AIR_STABLE_GAS_PCT = 2.0
 AIR_STABLE_HUM_DELTA = 0.5
 AIR_SLOW_ALPHA = 0.0005
-
 AIR_HISTORY_INTERVAL_SEC = 30
 AIR_HISTORY_LOCK_AFTER_REACTION_SEC = 3 * 60 * 60
 MAX_AIR_HISTORY_ROWS = 1000
-
 DETECT_CONFIRM_COUNT = 2
-
 DECISION_DELAY_SEC = 8.0
 WATER_MIX_DECISION_DELAY_SEC = 10.0
-
 RETURN_GAS_PCT = 6.0
 RETURN_HUM_DELTA = 2.0
 NORMAL_RETURN_COUNT = 3
-
 TRAIN_READY_SEC = 3.0
 TRAIN_RECORD_SEC = 10.0
 TRAIN_CURVE_STEP_SEC = 0.2
 TRAIN_FEATURE_INTERVAL_SEC = 999.0
 MIN_TRAIN_ROWS = 8
 TRAIN_LOOSE_FALLBACK_MIN_ROWS = 8
-
 FONT_PATHS = [
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 ]
-
 for path in FONT_PATHS:
     if os.path.exists(path):
         fm.fontManager.addfont(path)
         matplotlib.rcParams["font.family"] = fm.FontProperties(fname=path).get_name()
         break
-
 matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["toolbar"] = "None"
-
 spi = spidev.SpiDev()
 spi.open(0, 0)
 spi.max_speed_hz = 50000
 spi.mode = 0
-
 REG_CHIP_ID = 0xD0
 REG_RESET = 0xE0
 REG_STATUS = 0x73
@@ -103,24 +82,20 @@ REG_RES_HEAT_0 = 0x5A
 REG_GAS_WAIT_0 = 0x64
 REG_FIELD0 = 0x1D
 REG_RANGE_SW_ERR = 0x04
-
 GAS_LOOKUP_1 = [
     2147483647, 2147483647, 2147483647, 2147483647,
     2147483647, 2126008810, 2147483647, 2130303777,
     2147483647, 2147483647, 2143188679, 2136746228,
     2147483647, 2126008810, 2147483647, 2147483647
 ]
-
 GAS_LOOKUP_2 = [
     4096000000, 2048000000, 1024000000, 512000000,
     255744255, 127110228, 64000000, 32258064,
     16016016, 8000000, 4000000, 2000000,
     1000000, 500000, 250000, 125000
 ]
-
 cal = {}
 t_fine = 0.0
-
 GROUP_LABELS = {
     "IPA": "IPA",
     "IPA_HIGH": "IPA",
@@ -133,13 +108,10 @@ GROUP_LABELS = {
     "ETHANOL_LOW": "ETHANOL",
     "ETHANOL_WATER": "ETHANOL_WATER",
 }
-
 WATER_MIX_LABEL_GROUPS = {
     "IPA_WATER": "IPA",
     "ETHANOL_WATER": "ETHANOL",
 }
-
-
 VALID_CLASSIFY_LABELS = {
     "IPA",
     "IPA_HIGH",
@@ -150,7 +122,6 @@ VALID_CLASSIFY_LABELS = {
     "ETHANOL_HIGH",
     "ETHANOL_LOW",
 }
-
 TRAIN_BUTTONS = [
     ("에탄올 원액", "ETHANOL_HIGH"),
     ("에탄올 0.05", "ETHANOL_LOW"),
@@ -161,16 +132,10 @@ TRAIN_BUTTONS = [
     ("IPA + 물", "IPA_WATER"),
     ("에탄올 + 물", "ETHANOL_WATER"),
 ]
-
-
 def read_reg_raw(reg):
     return spi.xfer2([reg | 0x80, 0x00])[1]
-
-
 def write_reg_raw(reg, value):
     spi.xfer2([reg & 0x7F, value & 0xFF])
-
-
 def set_mem_page(reg):
     status = read_reg_raw(REG_STATUS)
     if reg < 0x80:
@@ -179,44 +144,28 @@ def set_mem_page(reg):
         status &= ~0x10
     write_reg_raw(REG_STATUS, status)
     time.sleep(0.001)
-
-
 def read_reg(reg):
     set_mem_page(reg)
     return read_reg_raw(reg)
-
-
 def write_reg(reg, value):
     set_mem_page(reg)
     write_reg_raw(reg, value)
-
-
 def read_regs(reg, length):
     set_mem_page(reg)
     return spi.xfer2([reg | 0x80] + [0x00] * length)[1:]
-
-
 def u16(lsb, msb):
     return (msb << 8) | lsb
-
-
 def s16(lsb, msb):
     v = u16(lsb, msb)
     return v - 65536 if v & 0x8000 else v
-
-
 def s8(v):
     return v - 256 if v & 0x80 else v
-
-
 def read_calibration():
     b1 = read_regs(0x89, 25)
     b2 = read_regs(0xE1, 16)
-
     cal["par_t1"] = u16(b2[8], b2[9])
     cal["par_t2"] = s16(b1[1], b1[2])
     cal["par_t3"] = s8(b1[3])
-
     cal["par_p1"] = u16(b1[5], b1[6])
     cal["par_p2"] = s16(b1[7], b1[8])
     cal["par_p3"] = s8(b1[9])
@@ -227,7 +176,6 @@ def read_calibration():
     cal["par_p8"] = s16(b1[19], b1[20])
     cal["par_p9"] = s16(b1[21], b1[22])
     cal["par_p10"] = b1[23]
-
     cal["par_h1"] = (b2[2] << 4) | (b2[1] & 0x0F)
     cal["par_h2"] = (b2[0] << 4) | (b2[1] >> 4)
     cal["par_h3"] = s8(b2[3])
@@ -235,41 +183,29 @@ def read_calibration():
     cal["par_h5"] = s8(b2[5])
     cal["par_h6"] = b2[6]
     cal["par_h7"] = s8(b2[7])
-
     cal["range_sw_err"] = (read_reg(REG_RANGE_SW_ERR) & 0xF0) >> 4
-
-
 def compensate_temp(temp_adc):
     global t_fine
     var1 = ((temp_adc / 16384.0) - (cal["par_t1"] / 1024.0)) * cal["par_t2"]
     var2 = (((temp_adc / 131072.0) - (cal["par_t1"] / 8192.0)) ** 2) * (cal["par_t3"] * 16.0)
     t_fine = var1 + var2
     return t_fine / 5120.0
-
-
 def compensate_pressure(press_adc):
     var1 = (t_fine / 2.0) - 64000.0
     var2 = var1 * var1 * cal["par_p6"] / 131072.0
     var2 += var1 * cal["par_p5"] * 2.0
     var2 = (var2 / 4.0) + (cal["par_p4"] * 65536.0)
-
     var1 = ((cal["par_p3"] * var1 * var1 / 16384.0) + (cal["par_p2"] * var1)) / 524288.0
     var1 = (1.0 + (var1 / 32768.0)) * cal["par_p1"]
-
     if var1 == 0:
         return 0.0
-
     pressure = 1048576.0 - press_adc
     pressure = ((pressure - (var2 / 4096.0)) * 6250.0) / var1
-
     var1 = cal["par_p9"] * pressure * pressure / 2147483648.0
     var2 = pressure * cal["par_p8"] / 32768.0
     var3 = (pressure / 256.0) ** 3 * (cal["par_p10"] / 131072.0)
-
     pressure += (var1 + var2 + var3 + (cal["par_p7"] * 128.0)) / 16.0
     return pressure / 100.0
-
-
 def compensate_humidity(hum_adc, temp_c):
     var1 = hum_adc - ((cal["par_h1"] * 16.0) + ((cal["par_h3"] / 2.0) * temp_c))
     var2 = var1 * (
@@ -280,40 +216,27 @@ def compensate_humidity(hum_adc, temp_c):
     var4 = cal["par_h7"] / 2097152.0
     humidity = var2 + ((var3 + (var4 * temp_c)) * var2 * var2)
     return max(0.0, min(100.0, humidity))
-
-
 def calc_gas_resistance(gas_adc, gas_range):
     if gas_adc == 0:
         return 0.0
-
     var1 = ((1340 + (5 * cal["range_sw_err"])) * GAS_LOOKUP_1[gas_range]) / 65536.0
     var2 = ((gas_adc * 32768.0) - 16777216.0) + var1
     var3 = (GAS_LOOKUP_2[gas_range] * var1) / 512.0
-
     if var2 == 0:
         return 0.0
-
     return var3 / var2
-
-
 def set_heater(res_heat):
     write_reg(REG_RES_HEAT_0, res_heat)
     write_reg(REG_GAS_WAIT_0, 0x59)
     write_reg(REG_CTRL_GAS_1, 0x20)
-
-
 def trigger_measurement():
     ctrl_meas = (0b010 << 5) | (0b101 << 2) | 0b01
     write_reg(REG_CTRL_MEAS, ctrl_meas)
-
-
 def sensor_init():
     chip_id = read_reg(REG_CHIP_ID)
     print("Chip ID:", hex(chip_id))
-
     if chip_id != 0x61:
         raise RuntimeError("BME688/BME680 chip ID error")
-
     write_reg(REG_RESET, 0xB6)
     time.sleep(0.2)
     read_calibration()
@@ -321,35 +244,25 @@ def sensor_init():
     write_reg(REG_CTRL_HUM, 0x01)
     write_reg(REG_CTRL_GAS_0, 0x00)
     set_heater(HEATER_VALUE)
-
-
 def read_sensor():
     set_heater(HEATER_VALUE)
     trigger_measurement()
     time.sleep(MEASURE_SLEEP_SEC)
-
     data = read_regs(REG_FIELD0, 17)
-
     pressure_adc = (data[2] << 12) | (data[3] << 4) | (data[4] >> 4)
     temp_adc = (data[5] << 12) | (data[6] << 4) | (data[7] >> 4)
     hum_adc = (data[8] << 8) | data[9]
-
     gas_msb = data[15]
     gas_lsb = data[16]
-
     gas_adc = (gas_msb << 2) | (gas_lsb >> 6)
     gas_range = gas_lsb & 0x0F
-
     gas_valid = bool(gas_lsb & 0x20)
     heat_stable = bool(gas_lsb & 0x10)
-
     temp_c = compensate_temp(temp_adc)
     press_hpa = compensate_pressure(pressure_adc)
     hum_pct = compensate_humidity(hum_adc, temp_c)
     gas_ohm = calc_gas_resistance(gas_adc, gas_range)
-
     now = datetime.now()
-
     return {
         "timestamp": now.isoformat(timespec="milliseconds"),
         "epoch": time.time(),
@@ -365,27 +278,19 @@ def read_sensor():
         "heat_stable": heat_stable,
         "recordable": bool(gas_valid and heat_stable and gas_ohm > 0),
     }
-
-
 def to_float(v, default=0.0):
     try:
         return float(v)
     except Exception:
         return default
-
-
 def to_bool(v):
     if isinstance(v, bool):
         return v
     if isinstance(v, str):
         return v.lower() in ["true", "1", "yes", "y"]
     return bool(v)
-
-
 def mean(values):
     return sum(values) / len(values) if values else 0.0
-
-
 def median(values):
     values = sorted(values)
     n = len(values)
@@ -394,15 +299,11 @@ def median(values):
     if n % 2:
         return values[n // 2]
     return (values[n // 2 - 1] + values[n // 2]) / 2.0
-
-
 def stdev(values):
     if len(values) < 2:
         return 0.0
     m = mean(values)
     return math.sqrt(sum((x - m) ** 2 for x in values) / (len(values) - 1))
-
-
 def load_csv(path):
     if not os.path.exists(path):
         return []
@@ -411,53 +312,38 @@ def load_csv(path):
             return list(csv.DictReader(f))
     except Exception:
         return []
-
-
 def write_csv(path, rows):
     if not rows:
         if os.path.exists(path):
             os.remove(path)
         return
-
     fieldnames = []
     for r in rows:
         for k in r.keys():
             if k not in fieldnames:
                 fieldnames.append(k)
-
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-
-
 def append_dict_csv(path, row):
     file_exists = os.path.exists(path) and os.path.getsize(path) > 0
     fieldnames = list(row.keys())
-
     with open(path, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
-
-
 def save_dict_csv(path, row):
     rows = load_csv(path)
     rows.append(row)
     write_csv(path, rows)
-
-
 def trim_csv(path, max_rows):
     rows = load_csv(path)
     if len(rows) > max_rows:
         write_csv(path, rows[-max_rows:])
-
-
 def label_group(label):
     return GROUP_LABELS.get(label, label)
-
-
 def label_korean(label):
     g = label_group(label)
     if g == "ETHANOL":
@@ -467,8 +353,6 @@ def label_korean(label):
     if g == "NORMAL":
         return "정상범위"
     return label
-
-
 def label_detail_korean(label):
     names = {
         "ETHANOL": "에탄올",
@@ -483,38 +367,26 @@ def label_detail_korean(label):
         "ETHANOL_WATER": "에탄올 + 물",
     }
     return names.get(label, label)
-
-
 def count_labels():
     rows = load_csv(SAMPLES_CSV)
     counts = {"IPA": 0, "ETHANOL": 0}
-
     for r in rows:
         g = label_group(r.get("label", ""))
         if g in counts:
             counts[g] += 1
-
     return counts
-
-
 def clean_rows(rows):
     out = []
-
     for r in rows:
         gas = to_float(r.get("gas_ohm", 0))
-
         if gas <= 0:
             continue
-
         if not to_bool(r.get("gas_valid", True)):
             continue
-
         if not to_bool(r.get("heat_stable", True)):
             continue
-
         if not to_bool(r.get("recordable", True)):
             continue
-
         rr = dict(r)
         rr["epoch"] = to_float(rr.get("epoch", 0))
         rr["gas_ohm"] = gas
@@ -524,17 +396,12 @@ def clean_rows(rows):
         rr["gas_adc"] = to_float(rr.get("gas_adc", 0))
         rr["gas_range"] = to_float(rr.get("gas_range", 0))
         out.append(rr)
-
     out.sort(key=lambda x: x["epoch"])
     return out
-
-
-
 def clean_train_rows(rows):
     strict = clean_rows(rows)
     if len(strict) >= MIN_TRAIN_ROWS:
         return strict, "STRICT"
-
     loose = []
     for r in rows:
         gas = to_float(r.get("gas_ohm", 0))
@@ -556,30 +423,22 @@ def clean_train_rows(rows):
     if len(loose) >= TRAIN_LOOSE_FALLBACK_MIN_ROWS:
         return loose, "LOOSE_GAS_ONLY"
     return strict, "INSUFFICIENT"
-
 def load_air_memory():
     rows = load_csv(AIR_MEMORY_CSV)
-
     if not rows:
         return None
-
     r = rows[-1]
-
     gas = to_float(r.get("gas_ohm", 0))
     hum = to_float(r.get("hum_pct", 0))
     temp = to_float(r.get("temp_c", 0))
-
     if gas <= 0:
         return None
-
     return {
         "gas": gas,
         "hum": hum,
         "temp": temp,
         "timestamp": r.get("timestamp", ""),
     }
-
-
 def save_air_memory(gas, hum, temp):
     row = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -588,12 +447,9 @@ def save_air_memory(gas, hum, temp):
         "temp_c": temp,
     }
     save_dict_csv(AIR_MEMORY_CSV, row)
-
-
 def calc_shape(rows):
     rows = clean_rows(rows)
     gas = [r["gas_ohm"] for r in rows]
-
     if len(gas) < 4:
         return {
             "smooth": 0.0,
@@ -601,82 +457,62 @@ def calc_shape(rows):
             "slope_stdev": 0.0,
             "direction_changes": 0,
         }
-
     diffs = [gas[i] - gas[i - 1] for i in range(1, len(gas))]
     abs_diffs = [abs(x) for x in diffs]
     gas_avg = mean(gas)
-
     smooth = mean(abs_diffs) / gas_avg if gas_avg else 0.0
-
     direction_changes = 0
     prev = 0
-
     for d in diffs:
         cur = 1 if d > 0 else -1 if d < 0 else 0
         if prev != 0 and cur != 0 and cur != prev:
             direction_changes += 1
         if cur != 0:
             prev = cur
-
     return {
         "smooth": smooth,
         "slope_avg": mean(diffs),
         "slope_stdev": stdev(diffs),
         "direction_changes": direction_changes,
     }
-
-
 def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     rows = clean_rows(rows)
-
     if len(rows) < MIN_CLASSIFY_ROWS:
         return None
-
     gas = [r["gas_ohm"] for r in rows]
     hum = [r["hum_pct"] for r in rows]
     temp = [r["temp_c"] for r in rows]
     press = [r["press_hpa"] for r in rows]
-
     start_epoch = rows[0]["epoch"]
     end_epoch = rows[-1]["epoch"]
     duration = max(0.001, end_epoch - start_epoch)
-
     gas_ref = air_gas if air_gas and air_gas > 0 else gas[0]
     hum_ref = air_hum if air_hum is not None else hum[0]
-
     gas_now = gas[-1]
     hum_now = hum[-1]
-
     gas_min = min(gas)
     gas_max = max(gas)
     gas_avg = mean(gas)
     gas_end = mean(gas[-min(5, len(gas)):])
-
     hum_min = min(hum)
     hum_max = max(hum)
     hum_avg = mean(hum)
     hum_end = mean(hum[-min(5, len(hum)):])
-
     gas_now_pct = ((gas_now - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
     gas_min_pct = ((gas_min - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
     gas_avg_pct = ((gas_avg - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
     gas_end_pct = ((gas_end - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
-
     hum_now_delta = hum_now - hum_ref
     hum_max_delta = hum_max - hum_ref
     hum_avg_delta = hum_avg - hum_ref
     hum_end_delta = hum_end - hum_ref
-
     hum_gas_ratio = hum_max_delta / max(1.0, abs(gas_min_pct))
-
     early_n = max(2, min(len(rows), len(rows) // 3))
     late_n = max(2, min(len(rows), len(rows) // 3))
-
     early_gas = mean(gas[:early_n])
     late_gas = mean(gas[-late_n:])
     early_hum = mean(hum[:early_n])
     late_hum = mean(hum[-late_n:])
-
     def value_at_sec(values, sec):
         target = start_epoch + sec
         best = values[-1]
@@ -687,7 +523,6 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
                 best_dt = dt
                 best = v
         return best
-
     def avg_between(values, sec_a, sec_b):
         a = start_epoch + sec_a
         b = start_epoch + sec_b
@@ -695,19 +530,14 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         if selected:
             return mean(selected)
         return value_at_sec(values, min(sec_b, duration))
-
     def pct_from_ref(v):
         return ((v - gas_ref) / gas_ref) * 100.0 if gas_ref else 0.0
-
     def delta_from_ref(v):
         return v - hum_ref
-
     def gas_drop_at(sec):
         return pct_from_ref(value_at_sec(gas, min(sec, duration)))
-
     def hum_rise_at(sec):
         return delta_from_ref(value_at_sec(hum, min(sec, duration)))
-
     gas_drop_1s = gas_drop_at(1.0)
     gas_drop_2s = gas_drop_at(2.0)
     gas_drop_3s = gas_drop_at(3.0)
@@ -716,7 +546,6 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     gas_drop_6s = gas_drop_at(6.0)
     gas_drop_8s = gas_drop_at(8.0)
     gas_drop_10s = gas_drop_at(10.0)
-
     hum_rise_1s = hum_rise_at(1.0)
     hum_rise_2s = hum_rise_at(2.0)
     hum_rise_3s = hum_rise_at(3.0)
@@ -725,27 +554,22 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     hum_rise_6s = hum_rise_at(6.0)
     hum_rise_8s = hum_rise_at(8.0)
     hum_rise_10s = hum_rise_at(10.0)
-
     gas_avg_0_2 = pct_from_ref(avg_between(gas, 0.0, min(2.0, duration)))
     gas_avg_2_5 = pct_from_ref(avg_between(gas, 2.0, min(5.0, duration)))
     gas_avg_5_8 = pct_from_ref(avg_between(gas, 5.0, min(8.0, duration)))
     gas_avg_8_10 = pct_from_ref(avg_between(gas, 8.0, min(10.0, duration)))
-
     hum_avg_0_2 = delta_from_ref(avg_between(hum, 0.0, min(2.0, duration)))
     hum_avg_2_5 = delta_from_ref(avg_between(hum, 2.0, min(5.0, duration)))
     hum_avg_5_8 = delta_from_ref(avg_between(hum, 5.0, min(8.0, duration)))
     hum_avg_8_10 = delta_from_ref(avg_between(hum, 8.0, min(10.0, duration)))
-
     gas_speed_0_2s = (gas_drop_2s - gas_drop_1s) / max(0.001, min(2.0, duration) - min(1.0, duration)) if duration > 1.0 else 0.0
     gas_speed_2_5s = (gas_drop_at(5.0) - gas_drop_2s) / max(0.001, min(5.0, duration) - min(2.0, duration)) if duration > 2.0 else 0.0
     gas_speed_5_8s = (gas_drop_8s - gas_drop_at(5.0)) / max(0.001, min(8.0, duration) - min(5.0, duration)) if duration > 5.0 else 0.0
     gas_speed_8_10s = (gas_drop_10s - gas_drop_8s) / max(0.001, min(10.0, duration) - min(8.0, duration)) if duration > 8.0 else 0.0
-
     hum_speed_0_2s = (hum_rise_2s - hum_rise_1s) / max(0.001, min(2.0, duration) - min(1.0, duration)) if duration > 1.0 else 0.0
     hum_speed_2_5s = (hum_rise_at(5.0) - hum_rise_2s) / max(0.001, min(5.0, duration) - min(2.0, duration)) if duration > 2.0 else 0.0
     hum_speed_5_8s = (hum_rise_8s - hum_rise_at(5.0)) / max(0.001, min(8.0, duration) - min(5.0, duration)) if duration > 5.0 else 0.0
     hum_speed_8_10s = (hum_rise_10s - hum_rise_8s) / max(0.001, min(10.0, duration) - min(8.0, duration)) if duration > 8.0 else 0.0
-
     early_1_3_drop = gas_drop_3s - gas_drop_1s
     mid_2_5_drop = gas_drop_5s - gas_drop_2s
     early_1_3_speed = early_1_3_drop / 2.0
@@ -757,12 +581,10 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     early_gas_per_hum_2s = abs(gas_drop_2s) / max(0.1, hum_rise_2s)
     early_gas_per_hum_4s = abs(gas_drop_4s) / max(0.1, hum_rise_4s)
     mid_gas_per_hum_5s = abs(gas_drop_5s) / max(0.1, hum_rise_5s)
-
     hum_gas_ratio_2s = hum_rise_2s / max(1.0, abs(gas_drop_2s))
     hum_gas_ratio_5s = hum_rise_at(5.0) / max(1.0, abs(gas_drop_at(5.0)))
     hum_gas_ratio_8s = hum_rise_8s / max(1.0, abs(gas_drop_8s))
     hum_gas_ratio_10s = hum_rise_10s / max(1.0, abs(gas_drop_10s))
-
     gas_late_extra_drop = gas_drop_8s - gas_drop_6s
     late_gas_per_hum = abs(gas_drop_8s) / max(0.1, hum_rise_8s)
     late_gas_per_hum_6_8 = abs(gas_late_extra_drop) / max(0.1, hum_rise_8s - hum_rise_6s)
@@ -770,12 +592,10 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     hum_extra_rise_8_10s = hum_rise_10s - hum_rise_8s
     late10_gas_per_hum = abs(gas_drop_10s) / max(0.1, hum_rise_10s)
     late10_extra_gas_per_hum = abs(gas_extra_drop_8_10s) / max(0.1, hum_extra_rise_8_10s)
-
     gas_early_late_gap = gas_avg_0_2 - gas_avg_5_8
     hum_early_late_gap = hum_avg_5_8 - hum_avg_0_2
     gas_accel_early_to_late = gas_speed_5_8s - gas_speed_0_2s
     hum_accel_early_to_late = hum_speed_5_8s - hum_speed_0_2s
-
     gas_pct_series = [pct_from_ref(v) for v in gas]
     hum_delta_series = [delta_from_ref(v) for v in hum]
     reaction_idx = 0
@@ -791,12 +611,10 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         if consecutive >= 2:
             reaction_idx = max(0, i - 1)
             break
-
     reaction_start_epoch = rows[reaction_idx]["epoch"]
     reaction_offset_sec = max(0.0, reaction_start_epoch - start_epoch)
     reaction_duration_sec = max(0.001, end_epoch - reaction_start_epoch)
     reaction_detected = 1 if reaction_idx > 0 else 0
-
     def value_at_reaction_sec(values, sec):
         target = reaction_start_epoch + min(sec, reaction_duration_sec)
         best = values[-1]
@@ -807,13 +625,10 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
                 best_dt = dt
                 best = v
         return best
-
     def rs_gas_drop_at(sec):
         return pct_from_ref(value_at_reaction_sec(gas, sec))
-
     def rs_hum_rise_at(sec):
         return delta_from_ref(value_at_reaction_sec(hum, sec))
-
     rs_gas_drop_1s = rs_gas_drop_at(1.0)
     rs_gas_drop_2s = rs_gas_drop_at(2.0)
     rs_gas_drop_3s = rs_gas_drop_at(3.0)
@@ -821,7 +636,6 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     rs_gas_drop_5s = rs_gas_drop_at(5.0)
     rs_gas_drop_8s = rs_gas_drop_at(8.0)
     rs_gas_drop_10s = rs_gas_drop_at(10.0)
-
     rs_hum_rise_1s = rs_hum_rise_at(1.0)
     rs_hum_rise_2s = rs_hum_rise_at(2.0)
     rs_hum_rise_3s = rs_hum_rise_at(3.0)
@@ -829,19 +643,16 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     rs_hum_rise_5s = rs_hum_rise_at(5.0)
     rs_hum_rise_8s = rs_hum_rise_at(8.0)
     rs_hum_rise_10s = rs_hum_rise_at(10.0)
-
     rs_early_1_3_drop = rs_gas_drop_3s - rs_gas_drop_1s
     rs_mid_2_5_drop = rs_gas_drop_5s - rs_gas_drop_2s
     rs_early_1_3_speed = rs_early_1_3_drop / 2.0
     rs_mid_2_5_speed = rs_mid_2_5_drop / 3.0
     rs_gas_speed_0_2s = rs_gas_drop_2s - rs_gas_drop_1s
     rs_gas_speed_2_5s = rs_mid_2_5_speed
-
     rs_early_hum_1_3_rise = rs_hum_rise_3s - rs_hum_rise_1s
     rs_mid_hum_2_5_rise = rs_hum_rise_5s - rs_hum_rise_2s
     rs_early_hum_1_3_speed = rs_early_hum_1_3_rise / 2.0
     rs_mid_hum_2_5_speed = rs_mid_hum_2_5_rise / 3.0
-
     gas_total_drop_norm = max(0.1, abs(rs_gas_drop_10s), abs(gas_min_pct))
     hum_total_rise_norm = max(0.1, rs_hum_rise_10s, hum_max_delta)
     rs_gas_ratio_1s = abs(rs_gas_drop_1s) / gas_total_drop_norm
@@ -851,16 +662,12 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
     rs_gas_ratio_5s = abs(rs_gas_drop_5s) / gas_total_drop_norm
     rs_mid_ratio_2_5 = abs(rs_gas_drop_5s - rs_gas_drop_2s) / gas_total_drop_norm
     rs_late_ratio_5_10 = abs(rs_gas_drop_10s - rs_gas_drop_5s) / gas_total_drop_norm
-
     rs_hum_ratio_2s = max(0.0, rs_hum_rise_2s) / hum_total_rise_norm
     rs_hum_ratio_4s = max(0.0, rs_hum_rise_4s) / hum_total_rise_norm
     rs_hum_ratio_5s = max(0.0, rs_hum_rise_5s) / hum_total_rise_norm
-
     temp_delta = temp[-1] - temp[0]
     press_delta = press[-1] - press[0]
-
     shape = calc_shape(rows)
-
     curve_features = {}
     steps = int(round(TRAIN_RECORD_SEC / TRAIN_CURVE_STEP_SEC))
     for i in range(steps + 1):
@@ -870,7 +677,6 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         curve_features[f"hum_curve_{key_sec}s"] = hum_rise_at(sec)
         curve_features[f"rs_gas_curve_{key_sec}s"] = rs_gas_drop_at(sec)
         curve_features[f"rs_hum_curve_{key_sec}s"] = rs_hum_rise_at(sec)
-
     return {
         **curve_features,
         "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3],
@@ -1028,26 +834,18 @@ def extract_live_feature(rows, air_gas, air_hum, label="LIVE"):
         "gas_slope_stdev": shape["slope_stdev"],
         "gas_direction_changes": shape["direction_changes"],
     }
-
 META_KEYS = {"id", "timestamp", "label", "group", "detail", "train_type"}
-
-
 def numeric_keys(row):
     keys = []
-
     for k, v in row.items():
         if k in META_KEYS:
             continue
-
         try:
             float(v)
             keys.append(k)
         except Exception:
             pass
-
     return keys
-
-
 def key_scale(key):
     if key.startswith("rs_gas_curve_"):
         return 12.0
@@ -1138,7 +936,6 @@ def key_scale(key):
     if key == "press_delta":
         return 0.02
     return 0.001
-
 def time_weight(current_duration, sample_duration):
     diff = abs(current_duration - sample_duration)
     if diff <= 0.5:
@@ -1150,46 +947,32 @@ def time_weight(current_duration, sample_duration):
     if diff <= 4.0:
         return 0.85
     return 0.55
-
-
 def feature_distance(a, b):
     keys = sorted(set(numeric_keys(a)) & set(numeric_keys(b)))
     total = 0.0
     used = 0
-
     for k in keys:
         av = to_float(a.get(k, 0))
         bv = to_float(b.get(k, 0))
-
         if av == 0 and bv == 0:
             continue
-
         total += abs(av - bv) * key_scale(k)
         used += 1
-
     if used <= 0:
         return 999999.0
-
     return total / used
-
-
 def classify_ipa_ethanol(feature):
     samples = load_csv(SAMPLES_CSV)
     usable = []
-
     for s in samples:
         label = s.get("label", "")
         if label in VALID_CLASSIFY_LABELS:
             usable.append(s)
-
     scores = {"IPA": 0.0, "ETHANOL": 0.0}
     detail_scores = {}
-
     if not usable:
         return {"IPA": 0.0, "ETHANOL": 0.0}, "학습 데이터 없음", {}
-
     cur_duration = to_float(feature.get("duration_sec", 0))
-
     for s in usable:
         label = s.get("label", "")
         group = label_group(label)
@@ -1197,76 +980,53 @@ def classify_ipa_ethanol(feature):
         w = 1.0 / (1.0 + d)
         sample_duration = to_float(s.get("duration_sec", 0))
         w *= time_weight(cur_duration, sample_duration)
-
         if group in scores:
             scores[group] += w
             detail_scores[label] = detail_scores.get(label, 0.0) + w
-
     total = scores["IPA"] + scores["ETHANOL"]
-
     if total <= 0:
         return {"IPA": 0.0, "ETHANOL": 0.0}, "판별 불가", {}
-
     pct = {
         "IPA": round(scores["IPA"] / total * 100.0, 1),
         "ETHANOL": round(scores["ETHANOL"] / total * 100.0, 1),
     }
-
     winner = "IPA" if pct["IPA"] >= pct["ETHANOL"] else "ETHANOL"
     return pct, winner, detail_scores
-
-
-
 def classify_water_mixed_reference(feature):
     samples = load_csv(SAMPLES_CSV)
     usable = []
-
     for s in samples:
         label = s.get("label", "")
         if label in WATER_MIX_LABEL_GROUPS:
             usable.append(s)
-
     group_counts = {"IPA": 0, "ETHANOL": 0}
-
     for s in usable:
         group = WATER_MIX_LABEL_GROUPS.get(s.get("label", ""), "")
         if group in group_counts:
             group_counts[group] += 1
-
     if group_counts["IPA"] <= 0 or group_counts["ETHANOL"] <= 0:
         return None, None, group_counts
-
     scores = {"IPA": 0.0, "ETHANOL": 0.0}
     cur_duration = to_float(feature.get("duration_sec", 0))
-
     for s in usable:
         label = s.get("label", "")
         group = WATER_MIX_LABEL_GROUPS.get(label, "")
         if group not in scores:
             continue
-
         d = feature_distance(feature, s)
         w = 1.0 / (1.0 + d)
         sample_duration = to_float(s.get("duration_sec", 0))
         w *= time_weight(cur_duration, sample_duration)
         scores[group] += w
-
     total = scores["IPA"] + scores["ETHANOL"]
-
     if total <= 0:
         return None, None, group_counts
-
     pct = {
         "IPA": round(scores["IPA"] / total * 100.0, 1),
         "ETHANOL": round(scores["ETHANOL"] / total * 100.0, 1),
     }
-
     winner = "IPA" if pct["IPA"] >= pct["ETHANOL"] else "ETHANOL"
     return pct, winner, group_counts
-
-
-
-
 DYNAMIC_WATER_BASE_FEATURES = [
     "rs_hum_rise_1s", "rs_hum_rise_2s", "rs_hum_rise_3s", "rs_hum_rise_4s", "rs_hum_rise_5s",
     "rs_gas_drop_1s", "rs_gas_drop_2s", "rs_gas_drop_3s", "rs_gas_drop_4s", "rs_gas_drop_5s",
@@ -1278,24 +1038,18 @@ DYNAMIC_WATER_BASE_FEATURES = [
     "early_gas_per_hum_2s", "early_gas_per_hum_4s", "mid_gas_per_hum_5s",
     "hum_gas_ratio_2s", "hum_gas_ratio_5s",
 ]
-
 DYNAMIC_WATER_DERIVED_FEATURES = [
     "rs_gas_delta_1_2", "rs_gas_delta_2_3", "rs_gas_delta_3_4", "rs_gas_delta_4_5",
     "rs_hum_delta_1_2", "rs_hum_delta_2_3", "rs_hum_delta_3_4", "rs_hum_delta_4_5",
     "rs_ratio_delta_1_2", "rs_ratio_delta_2_3", "rs_ratio_delta_3_4", "rs_ratio_delta_4_5",
     "rs_hum_ratio_delta_2_4", "rs_hum_ratio_delta_4_5",
 ]
-
 DYNAMIC_WATER_FEATURES = DYNAMIC_WATER_BASE_FEATURES + DYNAMIC_WATER_DERIVED_FEATURES
-
-
 def dynamic_feature_value(row, key):
     if key in row and str(row.get(key, "")) != "":
         return to_float(row.get(key, 0.0))
-
     def v(k):
         return to_float(row.get(k, 0.0))
-
     derived = {
         "rs_gas_delta_1_2": v("rs_gas_drop_2s") - v("rs_gas_drop_1s"),
         "rs_gas_delta_2_3": v("rs_gas_drop_3s") - v("rs_gas_drop_2s"),
@@ -1313,9 +1067,13 @@ def dynamic_feature_value(row, key):
         "rs_hum_ratio_delta_4_5": v("rs_hum_ratio_5s") - v("rs_hum_ratio_4s"),
     }
     return derived.get(key, 0.0)
-
-
 def dynamic_feature_base_importance(key):
+    # [수정1] rs_hum_rise_1s/2s: Cohen's d 2.26/1.97 — 가장 강한 물혼합 분리 피처
+    if key in ["rs_hum_rise_1s", "rs_hum_rise_2s"]:
+        return 1.80
+    # [수정1] rs_hum_ratio_2s: Cohen's d 1.83 — 두 번째로 강한 피처
+    if key == "rs_hum_ratio_2s":
+        return 1.65
     if key.startswith("rs_hum_rise_"):
         return 1.25
     if key.startswith("rs_gas_ratio_"):
@@ -1331,8 +1089,6 @@ def dynamic_feature_base_importance(key):
     if "speed" in key or "rise" in key or "drop" in key:
         return 1.00
     return 0.75
-
-
 def dynamic_feature_floor(key):
     if "ratio" in key:
         return 0.035
@@ -1341,8 +1097,6 @@ def dynamic_feature_floor(key):
     if "gas" in key:
         return 0.25
     return 0.10
-
-
 def water_group_rows():
     rows = load_csv(SAMPLES_CSV)
     ipa_rows = []
@@ -1354,8 +1108,6 @@ def water_group_rows():
         elif label == "ETHANOL_WATER":
             eth_rows.append(r)
     return ipa_rows, eth_rows
-
-
 def group_stats_for_feature(rows, key):
     vals = []
     for r in rows:
@@ -1364,14 +1116,11 @@ def group_stats_for_feature(rows, key):
     if not vals:
         return 0.0, 0.0, 0
     return mean(vals), stdev(vals), len(vals)
-
-
 def build_dynamic_water_model():
     ipa_rows, eth_rows = water_group_rows()
     counts = {"IPA": len(ipa_rows), "ETHANOL": len(eth_rows)}
     if len(ipa_rows) < 2 or len(eth_rows) < 2:
         return None, counts
-
     model = {}
     for key in DYNAMIC_WATER_FEATURES:
         ipa_mean, ipa_std, ipa_n = group_stats_for_feature(ipa_rows, key)
@@ -1383,7 +1132,7 @@ def build_dynamic_water_model():
         raw_weight = sep / spread
         # 겹치는 feature는 자연스럽게 낮게, 잘 갈리는 feature는 높게.
         # 너무 큰 하나의 feature가 모든 것을 지배하지 않게 상한을 둔다.
-        weight = max(0.02, min(4.0, raw_weight)) * dynamic_feature_base_importance(key)
+        weight = max(0.02, min(6.0, raw_weight)) * dynamic_feature_base_importance(key)  # [수정2] cap 4→6
         if sep < dynamic_feature_floor(key) * 0.45:
             weight *= 0.25
         model[key] = {
@@ -1396,8 +1145,6 @@ def build_dynamic_water_model():
             "weight": weight,
         }
     return {"features": model, "ipa_rows": ipa_rows, "eth_rows": eth_rows}, counts
-
-
 def dynamic_distance_to_center(feature, model, side):
     total = 0.0
     wsum = 0.0
@@ -1414,8 +1161,6 @@ def dynamic_distance_to_center(feature, model, side):
     if wsum <= 0:
         return 999999.0
     return total / wsum
-
-
 def dynamic_distance_to_row(feature, sample, model):
     total = 0.0
     wsum = 0.0
@@ -1431,8 +1176,6 @@ def dynamic_distance_to_row(feature, sample, model):
     if wsum <= 0:
         return 999999.0
     return total / wsum
-
-
 def pct_from_two_distances(ipa_dist, eth_dist):
     ipa_score = 1.0 / (1.0 + max(0.0, ipa_dist))
     eth_score = 1.0 / (1.0 + max(0.0, eth_dist))
@@ -1443,17 +1186,13 @@ def pct_from_two_distances(ipa_dist, eth_dist):
         "IPA": round(ipa_score / total * 100.0, 1),
         "ETHANOL": round(eth_score / total * 100.0, 1),
     }
-
-
 def classify_water_mix_dynamic_distance(feature):
     model, counts = build_dynamic_water_model()
     if not model:
         return None, None, counts, {}
-
     proto_ipa_dist = dynamic_distance_to_center(feature, model, "IPA")
     proto_eth_dist = dynamic_distance_to_center(feature, model, "ETHANOL")
     proto_pct = pct_from_two_distances(proto_ipa_dist, proto_eth_dist)
-
     ipa_knn = 0.0
     eth_knn = 0.0
     ipa_dists = []
@@ -1464,14 +1203,12 @@ def classify_water_mix_dynamic_distance(feature):
     for r in model["eth_rows"]:
         d = dynamic_distance_to_row(feature, r, model)
         eth_dists.append(d)
-
     # 모든 샘플을 보되, 가까운 샘플이 점수를 더 많이 가져간다.
     # 작은 데이터에서는 평균 중심만 보면 튀는 테스트가 흔들리므로 KNN을 같이 섞는다.
     for d in sorted(ipa_dists)[:max(1, min(4, len(ipa_dists)) )]:
         ipa_knn += math.exp(-1.65 * d)
     for d in sorted(eth_dists)[:max(1, min(4, len(eth_dists)) )]:
         eth_knn += math.exp(-1.65 * d)
-
     if ipa_knn + eth_knn > 0:
         knn_pct = {
             "IPA": round(ipa_knn / (ipa_knn + eth_knn) * 100.0, 1),
@@ -1479,11 +1216,9 @@ def classify_water_mix_dynamic_distance(feature):
         }
     else:
         knn_pct = {"IPA": 50.0, "ETHANOL": 50.0}
-
     # 최종: 학습 평균곡선 60%, 가까운 개별 샘플 40%.
     ipa = proto_pct["IPA"] * 0.60 + knn_pct["IPA"] * 0.40
     eth = proto_pct["ETHANOL"] * 0.60 + knn_pct["ETHANOL"] * 0.40
-
     # 학습 데이터에서 실제로 잘 갈리는 상위 feature를 약간 더 반영한다.
     top = sorted(model["features"].items(), key=lambda kv: kv[1]["weight"], reverse=True)[:10]
     top_ipa = 0.0
@@ -1502,7 +1237,6 @@ def classify_water_mix_dynamic_distance(feature):
     if top_w > 0:
         ipa += (top_ipa / top_w) * 8.0
         eth += (top_eth / top_w) * 8.0
-
     ipa = max(0.0, ipa)
     eth = max(0.0, eth)
     total = ipa + eth
@@ -1511,7 +1245,6 @@ def classify_water_mix_dynamic_distance(feature):
     else:
         out = {"IPA": round(ipa / total * 100.0, 1), "ETHANOL": round(eth / total * 100.0, 1)}
     winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
-
     debug = {
         "proto_ipa_dist": round(proto_ipa_dist, 4),
         "proto_eth_dist": round(proto_eth_dist, 4),
@@ -1525,7 +1258,6 @@ def classify_water_mix_dynamic_distance(feature):
         debug[f"top{idx}"] = key
         debug[f"top{idx}_weight"] = round(m["weight"], 3)
     return out, winner, counts, debug
-
 def is_water_mix_region(feature):
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
@@ -1533,7 +1265,6 @@ def is_water_mix_region(feature):
     gas_min_pct = to_float(feature.get("gas_min_pct", 0))
     gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
     gas_drop_8s = to_float(feature.get("gas_drop_8s", 0))
-
     rs_hum_rise_2s = to_float(feature.get("rs_hum_rise_2s", feature.get("hum_rise_2s", 0)))
     rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", feature.get("hum_rise_4s", 0)))
     rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", feature.get("hum_rise_8s", 0)))
@@ -1541,20 +1272,17 @@ def is_water_mix_region(feature):
     rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
     rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
     reaction_duration_sec = to_float(feature.get("reaction_duration_sec", 0))
-
     dry_or_dilute_ipa = (
         hum_end_delta <= -0.8
         or hum_avg_delta <= -0.5
         or hum_max_delta < 4.8
     )
-
     too_strong_original_like = (
         abs(gas_min_pct) >= 18.0
         and gas_avg_pct <= -10.5
         and gas_drop_8s <= -9.0
         and hum_max_delta >= 9.5
     )
-
     water_humidity_shape = (
         hum_max_delta >= 5.5
         and (
@@ -1563,12 +1291,10 @@ def is_water_mix_region(feature):
             or hum_avg_delta >= 2.0
         )
     )
-
     gas_in_water_mix_range = (
         abs(gas_min_pct) <= 18.0
         and abs(gas_avg_pct) <= 11.0
     )
-
     rs_shape_available = (
         reaction_duration_sec <= 0
         or reaction_duration_sec >= 4.5
@@ -1576,21 +1302,16 @@ def is_water_mix_region(feature):
         or rs_late_ratio_5_10 > 0
         or rs_hum_rise_4s > 0
     )
-
     return water_humidity_shape and gas_in_water_mix_range and rs_shape_available and not dry_or_dilute_ipa and not too_strong_original_like
-
-
 def classify_water_mix_priority(feature, normal_pct):
     """물혼합이면 고정 if룰이 아니라, 현재 학습된 IPA_WATER / ETHANOL_WATER에서
     feature별 분리도를 자동 계산해서 더 가까운 쪽을 고른다.
     겹치는 feature는 weight가 낮고, 잘 갈리는 시간대/등락폭 feature는 weight가 높다.
     """
     dynamic_pct, dynamic_winner, dynamic_counts, debug = classify_water_mix_dynamic_distance(feature)
-
     # 학습 데이터가 부족하면 예전 전용 reference로 fallback.
     water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
     counts = dynamic_counts if dynamic_counts else water_counts
-
     if dynamic_pct:
         # 일반 분류는 8%만 섞는다. 물혼합에서는 일반 원액/저농도 학습이 오판을 크게 만들기 때문.
         ipa = dynamic_pct["IPA"] * 0.92 + float(normal_pct.get("IPA", 50.0)) * 0.08
@@ -1603,7 +1324,6 @@ def classify_water_mix_priority(feature, normal_pct):
         ipa = float(normal_pct.get("IPA", 50.0))
         eth = float(normal_pct.get("ETHANOL", 50.0))
         debug = {"fallback": "normal"}
-
     # 무조건 둘 중 하나로 분리한다. 애매 판정은 하지 않는다.
     ipa = max(0.0, ipa)
     eth = max(0.0, eth)
@@ -1612,18 +1332,15 @@ def classify_water_mix_priority(feature, normal_pct):
         out = {"IPA": 50.0, "ETHANOL": 50.0}
     else:
         out = {"IPA": round(ipa / total * 100.0, 1), "ETHANOL": round(eth / total * 100.0, 1)}
-
     winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
     rule_pct = {
         "IPA": dynamic_pct["IPA"] if dynamic_pct else (water_pct["IPA"] if water_pct else out["IPA"]),
         "ETHANOL": dynamic_pct["ETHANOL"] if dynamic_pct else (water_pct["ETHANOL"] if water_pct else out["ETHANOL"]),
     }
     return out, winner, dynamic_pct or water_pct, rule_pct, counts
-
 def adjust_for_water_mixed_ipa(feature, pct):
     ipa = float(pct.get("IPA", 0.0))
     eth = float(pct.get("ETHANOL", 0.0))
-
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
     hum_end_delta = to_float(feature.get("hum_end_delta", 0))
@@ -1631,7 +1348,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
     gas_avg_pct = to_float(feature.get("gas_avg_pct", 0))
     gas_end_pct = to_float(feature.get("gas_end_pct", 0))
     hum_gas_ratio = to_float(feature.get("hum_gas_ratio", 0))
-
     gas_drop_2s = to_float(feature.get("gas_drop_2s", 0))
     gas_drop_4s = to_float(feature.get("gas_drop_4s", 0))
     gas_drop_8s = to_float(feature.get("gas_drop_8s", 0))
@@ -1641,7 +1357,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
     hum_rise_8s = to_float(feature.get("hum_rise_8s", 0))
     hum_rise_10s = to_float(feature.get("hum_rise_10s", hum_rise_8s))
     gas_speed_0_2s = to_float(feature.get("gas_speed_0_2s", 0))
-
     rs_gas_drop_2s = to_float(feature.get("rs_gas_drop_2s", gas_drop_2s))
     rs_gas_drop_4s = to_float(feature.get("rs_gas_drop_4s", gas_drop_4s))
     rs_gas_drop_5s = to_float(feature.get("rs_gas_drop_5s", gas_drop_4s))
@@ -1650,13 +1365,11 @@ def adjust_for_water_mixed_ipa(feature, pct):
     rs_gas_speed_0_2s = to_float(feature.get("rs_gas_speed_0_2s", gas_speed_0_2s))
     rs_early_1_3_speed = to_float(feature.get("rs_early_1_3_speed", 0))
     rs_mid_2_5_speed = to_float(feature.get("rs_mid_2_5_speed", 0))
-
     rs_hum_rise_2s = to_float(feature.get("rs_hum_rise_2s", hum_rise_2s))
     rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", hum_rise_4s))
     rs_hum_rise_5s = to_float(feature.get("rs_hum_rise_5s", hum_rise_4s))
     rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", hum_rise_8s))
     rs_hum_rise_10s = to_float(feature.get("rs_hum_rise_10s", hum_rise_10s))
-
     rs_gas_ratio_2s = to_float(feature.get("rs_gas_ratio_2s", 0))
     rs_gas_ratio_4s = to_float(feature.get("rs_gas_ratio_4s", 0))
     rs_gas_ratio_5s = to_float(feature.get("rs_gas_ratio_5s", 0))
@@ -1664,11 +1377,9 @@ def adjust_for_water_mixed_ipa(feature, pct):
     rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
     rs_hum_ratio_2s = to_float(feature.get("rs_hum_ratio_2s", 0))
     rs_hum_ratio_4s = to_float(feature.get("rs_hum_ratio_4s", 0))
-
     reaction_offset_sec = to_float(feature.get("reaction_offset_sec", 0))
     reaction_duration_sec = to_float(feature.get("reaction_duration_sec", 0))
     duration_sec = to_float(feature.get("duration_sec", 0))
-
     # 물혼합은 원액/희석 IPA/에탄올보다 습도 상승이 크고, Gas 절대하락은 중간 영역에 들어온다.
     # 새 기준에서는 절대시간 gas_drop보다 reaction_start 기준 rs_*와 normalized ratio를 우선한다.
     mixed_water_region = (
@@ -1677,7 +1388,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
         and abs(gas_min_pct) <= 14.5
         and abs(gas_avg_pct) <= 9.0
     )
-
     # 강한 원액 에탄올류는 물혼합 보정이 IPA 쪽으로 끌지 않도록 보호한다.
     ethanol_strong = (
         hum_max_delta >= 8.5
@@ -1686,14 +1396,12 @@ def adjust_for_water_mixed_ipa(feature, pct):
         and rs_gas_drop_2s <= -3.0
         and rs_gas_drop_4s <= -5.0
     )
-
     # IPA 저농도/건조 반응은 물혼합으로 착각하지 않게 보호한다.
     ipa_dilute_like = (
         hum_end_delta <= -0.8
         or hum_avg_delta <= -0.5
         or hum_max_delta < 5.0
     )
-
     # 삭제 후 남긴 물혼합 데이터 기준 핵심:
     # IPA+물 = 초반 습도 상승과 초반 Gas 비율이 낮고, 후반 5~10초 비율이 남는다.
     ipa_water_core = (
@@ -1701,7 +1409,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
         and rs_hum_rise_4s < 3.30
         and rs_gas_ratio_4s < 0.60
     )
-
     ipa_water_strong = (
         mixed_water_region
         and rs_hum_rise_2s < 1.00
@@ -1709,14 +1416,12 @@ def adjust_for_water_mixed_ipa(feature, pct):
         and rs_gas_ratio_2s < 0.34
         and rs_gas_ratio_4s < 0.60
     )
-
     ipa_water_tail = (
         mixed_water_region
         and rs_late_ratio_5_10 >= 0.30
         and rs_gas_ratio_4s < 0.64
         and rs_hum_rise_4s < 3.60
     )
-
     ipa_water_slow_shape = (
         mixed_water_region
         and rs_gas_speed_0_2s > -0.85
@@ -1724,7 +1429,6 @@ def adjust_for_water_mixed_ipa(feature, pct):
         and rs_mid_2_5_speed > -1.05
         and rs_gas_ratio_5s < 0.78
     )
-
     # 에탄올+물 = reaction_start 이후 2~4초 습도상승이 빠르고,
     # 4초 안에 전체 Gas 반응의 큰 비율이 이미 나온다.
     ethanol_water_core = (
@@ -1732,79 +1436,72 @@ def adjust_for_water_mixed_ipa(feature, pct):
         and rs_hum_rise_4s >= 3.30
         and rs_gas_ratio_4s >= 0.60
     )
-
     ethanol_water_strong = (
         mixed_water_region
         and rs_hum_rise_2s >= 1.00
         and rs_hum_rise_4s >= 3.30
         and rs_gas_ratio_4s >= 0.60
     )
-
     ethanol_water_fast_front = (
         mixed_water_region
         and rs_gas_ratio_2s >= 0.34
         and rs_gas_ratio_4s >= 0.60
         and rs_late_ratio_5_10 < 0.32
     )
-
     ethanol_water_hum_fast = (
         mixed_water_region
         and rs_hum_ratio_2s >= 0.18
         and rs_hum_ratio_4s >= 0.42
         and rs_hum_rise_4s >= 3.30
     )
-
     # 경계값에서 어느 쪽이 더 강한지 점수화한다.
     # 한 조건만으로 뒤집지 않고 여러 조건이 같이 맞을 때 크게 보정한다.
     if ethanol_strong:
         eth += 14.0
-
     if ipa_dilute_like:
         ipa += 10.0
         eth -= 3.0
-
     if mixed_water_region:
+        # [수정3] rs_hum_rise_2s: 단일 피처로 89% LOO — 가장 먼저 적용
+        if rs_hum_rise_2s < 0.85:
+            ipa += 22.0
+            eth -= 10.0
+        elif rs_hum_rise_2s > 1.03:
+            eth += 20.0
+            ipa -= 8.0
         if ipa_water_strong and not ethanol_strong:
             ipa += 22.0
             eth -= 8.0
         elif ipa_water_core and not ethanol_strong:
             ipa += 15.0
             eth -= 5.0
-
         if ipa_water_tail and not ethanol_water_strong and not ethanol_strong:
             ipa += 12.0
             eth -= 4.0
-
         if ipa_water_slow_shape and not ethanol_water_strong and not ethanol_strong:
             ipa += 7.0
             eth -= 2.0
-
         if ethanol_water_strong and not ipa_water_strong:
             eth += 18.0
             ipa -= 5.0
         elif ethanol_water_core and not ipa_water_core:
             eth += 12.0
             ipa -= 3.0
-
         if ethanol_water_fast_front and not ipa_water_tail:
             eth += 8.0
             ipa -= 2.0
-
         if ethanol_water_hum_fast and not ipa_water_strong:
             eth += 6.0
-
         # 단순 절대 gas_drop은 보조로만 사용한다. 후반 8~10초 절대값은 거의 사용하지 않는다.
         if rs_gas_drop_2s > -0.80 and rs_gas_drop_4s > -2.40 and rs_hum_rise_4s < 3.30:
             ipa += 5.0
         if rs_gas_drop_2s <= -1.20 and rs_gas_drop_4s <= -2.80 and rs_hum_rise_4s >= 3.30:
             eth += 4.0
-
         # 사람이 가스를 넣는 양 차이는 ratio로 보정한다.
         if rs_gas_ratio_4s < 0.56 and rs_late_ratio_5_10 >= 0.32 and not ethanol_water_strong:
             ipa += 8.0
         if rs_gas_ratio_4s >= 0.66 and rs_late_ratio_5_10 < 0.30 and not ipa_water_strong:
             eth += 7.0
-
         # reaction_start가 너무 늦거나 짧으면 과신하지 않게 보정폭을 줄이는 방향으로 살짝 중앙으로 당김.
         unreliable_rs = reaction_offset_sec > 4.0 or (reaction_duration_sec > 0 and reaction_duration_sec < 5.5)
         if unreliable_rs:
@@ -1814,9 +1511,8 @@ def adjust_for_water_mixed_ipa(feature, pct):
             else:
                 eth -= 3.0
                 ipa += 1.0
-
     else:
-        if hum_max_delta <= 6.0 or hum_gas_ratio <= 0.45:
+        if hum_max_delta <= 6.0 or hum_gas_ratio < 0.89:  # [수정4] 임계값 0.45→0.89 (실데이터 ETH min=0.906)
             ipa += 6.0
         if hum_max_delta >= 10.0 and gas_avg_pct <= -9.0 and gas_drop_2s <= -5.0:
             eth += 7.0
@@ -1824,10 +1520,8 @@ def adjust_for_water_mixed_ipa(feature, pct):
             eth += 5.0
         if gas_drop_4s <= -9.0 and hum_rise_4s >= 4.0:
             eth += 5.0
-
     # 물혼합 전용 학습 데이터가 있으면 참조하되, rs 조건과 충돌하면 약하게만 반영한다.
     water_pct, water_winner, water_counts = classify_water_mixed_reference(feature)
-
     if water_pct and mixed_water_region:
         margin = abs(water_pct["IPA"] - water_pct["ETHANOL"])
         if margin >= 10.0:
@@ -1839,21 +1533,17 @@ def adjust_for_water_mixed_ipa(feature, pct):
             else:
                 if ethanol_water_core or ethanol_water_fast_front:
                     eth += min(5.0, boost * 0.65)
-
     # 충돌 구간 처리: rs_hum과 rs_gas_ratio가 서로 애매하면 late tail을 우선한다.
     if mixed_water_region and ipa_water_core and ethanol_water_core:
         if rs_late_ratio_5_10 >= 0.32:
             ipa += 5.0
         else:
             eth += 3.0
-
     temp_avg = to_float(feature.get("temp_avg", 0))
     temp_delta = to_float(feature.get("temp_delta", 0))
     press_delta = to_float(feature.get("press_delta", 0))
-
     unstable_env = abs(temp_delta) >= 0.45 or abs(press_delta) >= 0.8
     temp_out = temp_avg > 0 and (temp_avg < 28.0 or temp_avg > 35.0)
-
     if unstable_env or temp_out:
         if eth > ipa:
             eth -= 2.0
@@ -1861,26 +1551,20 @@ def adjust_for_water_mixed_ipa(feature, pct):
         else:
             ipa -= 2.0
             eth += 1.0
-
     ipa = max(0.0, ipa)
     eth = max(0.0, eth)
-
     total = ipa + eth
     if total <= 0:
         return {"IPA": 50.0, "ETHANOL": 50.0}, "IPA"
-
     new_pct = {
         "IPA": round(ipa / total * 100.0, 1),
         "ETHANOL": round(eth / total * 100.0, 1),
     }
-
     winner = "IPA" if new_pct["IPA"] >= new_pct["ETHANOL"] else "ETHANOL"
     return new_pct, winner
-
 def is_water_mix_suspect(feature, pct):
     if is_water_mix_region(feature):
         return True
-
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
     gas_min_pct = to_float(feature.get("gas_min_pct", 0))
@@ -1888,7 +1572,6 @@ def is_water_mix_suspect(feature, pct):
     rs_hum_rise_4s = to_float(feature.get("rs_hum_rise_4s", feature.get("hum_rise_4s", 0)))
     rs_hum_rise_8s = to_float(feature.get("rs_hum_rise_8s", feature.get("hum_rise_8s", 0)))
     score_gap = abs(float(pct.get("IPA", 0.0)) - float(pct.get("ETHANOL", 0.0)))
-
     loose_water_like = (
         hum_max_delta >= 5.8
         and hum_avg_delta >= 1.5
@@ -1896,9 +1579,7 @@ def is_water_mix_suspect(feature, pct):
         and abs(gas_min_pct) <= 18.0
         and abs(gas_avg_pct) <= 11.0
     )
-
     return loose_water_like and score_gap <= 55.0
-
 def is_water_only_reaction(feature):
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
     hum_avg_delta = to_float(feature.get("hum_avg_delta", 0))
@@ -1911,13 +1592,11 @@ def is_water_only_reaction(feature):
     gas_speed_2_5s = to_float(feature.get("gas_speed_2_5s", 0))
     hum_gas_ratio = to_float(feature.get("hum_gas_ratio", 0))
     hum_gas_ratio_8s = to_float(feature.get("hum_gas_ratio_8s", 0))
-
     humidity_big = (
         hum_max_delta >= WATER_ONLY_HUM_DELTA
         and hum_avg_delta >= 5.0
         and hum_rise_8s >= 7.0
     )
-
     gas_too_weak = (
         abs(gas_min_pct) <= WATER_ONLY_GAS_MIN_ABS_PCT
         and abs(gas_avg_pct) <= WATER_ONLY_GAS_AVG_ABS_PCT
@@ -1926,26 +1605,20 @@ def is_water_only_reaction(feature):
         and gas_speed_0_2s > WATER_ONLY_GAS_SPEED_0_2S
         and gas_speed_2_5s > -1.2
     )
-
     humidity_over_gas = (
         hum_gas_ratio >= 1.8
         or hum_gas_ratio_8s >= 1.6
     )
-
     return humidity_big and gas_too_weak and humidity_over_gas
-
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title("BME688 IPA / 에탄올 판별")
         self.root.attributes("-fullscreen", True)
         self.fullscreen = True
-
         self.running = True
         self.sensor_ready = False
-
         air = load_air_memory()
-
         if air:
             self.mem_air_gas = air["gas"]
             self.mem_air_hum = air["hum"]
@@ -1954,10 +1627,8 @@ class App:
             self.mem_air_gas = None
             self.mem_air_hum = None
             self.mem_air_temp = None
-
         self.current_rows = deque(maxlen=2000)
         self.rolling_rows = deque(maxlen=300)
-
         self.live_state = "NORMAL"
         self.detect_count = 0
         self.normal_count = 0
@@ -1965,10 +1636,8 @@ class App:
         self.result_winner = None
         self.result_pct = {"IPA": 0.0, "ETHANOL": 0.0}
         self.detail_scores = {}
-
         self.last_state_text = "시작중"
         self.last_status_update_epoch = 0
-
         self.train_mode = None
         self.train_label = None
         self.train_rows = []
@@ -1980,10 +1649,8 @@ class App:
         self.train_start_air_gas = None
         self.train_start_air_hum = None
         self.train_start_air_temp = None
-
         self.last_reaction_time = 0
         self.last_air_history_time = 0
-
         self.bg = "#101820"
         self.card = "#182632"
         self.text = "#EAF2F8"
@@ -1993,28 +1660,21 @@ class App:
         self.yellow = "#FFD166"
         self.orange = "#FF9F1C"
         self.red = "#FF4D4D"
-
         self.root.configure(bg=self.bg)
         self.build_ui()
-
         self.sensor_thread = threading.Thread(target=self.loop, daemon=True)
         self.sensor_thread.start()
-
         self.update_ui()
-
     def safe_ui(self, func, *args, **kwargs):
         try:
             self.root.after(0, lambda: func(*args, **kwargs))
         except Exception:
             pass
-
     def build_ui(self):
         top = tk.Frame(self.root, bg=self.bg)
         top.pack(fill="x", padx=12, pady=8)
-
         title_box = tk.Frame(top, bg=self.bg)
         title_box.pack(side="left", fill="x", expand=True)
-
         self.status_main = tk.Label(
             title_box,
             text="상태: 시작중",
@@ -2024,7 +1684,6 @@ class App:
             anchor="w",
         )
         self.status_main.pack(anchor="w")
-
         self.status_sub = tk.Label(
             title_box,
             text="-",
@@ -2034,10 +1693,8 @@ class App:
             anchor="w",
         )
         self.status_sub.pack(anchor="w")
-
         btns = tk.Frame(top, bg=self.bg)
         btns.pack(side="right")
-
         buttons = [
             ("종료", self.close),
             ("재시작", self.restart_app),
@@ -2047,7 +1704,6 @@ class App:
             ("AIR기준저장", self.save_current_air_memory),
             ("초기화", self.reset_live_state),
         ]
-
         for txt, cmd in buttons:
             tk.Button(
                 btns,
@@ -2062,16 +1718,12 @@ class App:
                 padx=9,
                 pady=8,
             ).pack(side="right", padx=3)
-
         info = tk.Frame(self.root, bg=self.bg)
         info.pack(fill="x", padx=12)
-
         self.cards = {}
-
         for name in ["현재상태", "가스저항", "Gas변화", "습도변화", "IPA", "에탄올"]:
             f = tk.Frame(info, bg=self.card, padx=14, pady=10)
             f.pack(side="left", fill="x", expand=True, padx=5, pady=5)
-
             tk.Label(
                 f,
                 text=name,
@@ -2079,7 +1731,6 @@ class App:
                 fg=self.muted,
                 font=("NanumGothic", 11, "bold"),
             ).pack(anchor="w")
-
             value = tk.Label(
                 f,
                 text="-",
@@ -2088,19 +1739,14 @@ class App:
                 font=("NanumGothic", 19, "bold"),
             )
             value.pack(anchor="w")
-
             self.cards[name] = value
-
         self.plot_area = tk.Frame(self.root, bg=self.bg)
         self.plot_area.pack(fill="both", expand=True, padx=12, pady=8)
-
         self.fig = plt.Figure(figsize=(14, 7), facecolor=self.bg)
         self.ax_gas = self.fig.add_subplot(2, 1, 1)
         self.ax_hum = self.fig.add_subplot(2, 1, 2)
-
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_area)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
     def style_axis(self, ax):
         ax.set_facecolor(self.card)
         ax.tick_params(colors=self.muted)
@@ -2108,32 +1754,24 @@ class App:
         ax.yaxis.label.set_color(self.muted)
         ax.title.set_color(self.text)
         ax.grid(True, color="#314452", alpha=0.45)
-
         for spine in ax.spines.values():
             spine.set_color("#314452")
-
     def update_status(self, msg=None):
         counts = count_labels()
         air_txt = "없음"
-
         if self.mem_air_gas and self.mem_air_hum is not None:
             air_txt = f"{self.mem_air_gas:,.0f}Ω / {self.mem_air_hum:.1f}%"
-
         state = msg if msg else self.last_state_text
-
         lock_txt = ""
         now = time.time()
-
         if self.last_reaction_time > 0:
             remain = AIR_HISTORY_LOCK_AFTER_REACTION_SEC - (now - self.last_reaction_time)
             if remain > 0:
                 lock_txt = f" | AIR자동기록잠금 {int(remain // 60)}분"
-
         self.status_main.config(text=f"상태: {state}")
         self.status_sub.config(
             text=f"AIR기준 {air_txt} | IPA학습 {counts['IPA']} / ETH학습 {counts['ETHANOL']} | 판정대기 {DECISION_DELAY_SEC:.1f}s/물혼합 {WATER_MIX_DECISION_DELAY_SEC:.1f}s | 측정 {MEASURE_SLEEP_SEC:.2f}s{lock_txt}"
         )
-
     def restart_app(self):
         self.running = False
         try:
@@ -2142,22 +1780,18 @@ class App:
             pass
         python = sys.executable
         os.execv(python, [python] + sys.argv)
-
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
         self.root.attributes("-fullscreen", self.fullscreen)
-
     def show_train_menu(self):
         if self.train_mode:
             messagebox.showinfo("안내", "이미 학습 중입니다.")
             return
-
         win = tk.Toplevel(self.root)
         win.title("학습 선택")
         win.geometry("520x500")
         win.configure(bg=self.bg)
         win.attributes("-topmost", True)
-
         tk.Label(
             win,
             text="학습 종류 선택",
@@ -2165,14 +1799,11 @@ class App:
             fg=self.text,
             font=("NanumGothic", 18, "bold"),
         ).pack(pady=18)
-
         box = tk.Frame(win, bg=self.bg)
         box.pack(fill="both", expand=True, padx=20, pady=5)
-
         def start_and_close(label):
             win.destroy()
             self.start_train(label)
-
         for txt, label in TRAIN_BUTTONS:
             tk.Button(
                 box,
@@ -2187,7 +1818,6 @@ class App:
                 padx=10,
                 pady=10,
             ).pack(fill="x", pady=4)
-
         tk.Button(
             win,
             text="닫기",
@@ -2201,7 +1831,6 @@ class App:
             padx=10,
             pady=10,
         ).pack(fill="x", padx=20, pady=12)
-
     def reset_live_state(self):
         self.live_state = "NORMAL"
         self.detect_count = 0
@@ -2215,41 +1844,31 @@ class App:
         self.cards["IPA"].config(text="-")
         self.cards["에탄올"].config(text="-")
         self.last_state_text = "정상범위"
-
     def save_current_air_memory(self):
         rows = [
             r for r in list(self.current_rows)[-5:]
             if r.get("recordable") and r.get("gas_ohm", 0) > 0
         ]
-
         if len(rows) < 5:
             messagebox.showinfo("안내", "AIR 기준으로 저장할 유효 데이터가 부족합니다.")
             return
-
         gas = median([r["gas_ohm"] for r in rows])
         hum = median([r["hum_pct"] for r in rows])
         temp = median([r["temp_c"] for r in rows])
-
         self.mem_air_gas = gas
         self.mem_air_hum = hum
         self.mem_air_temp = temp
-
         save_air_memory(gas, hum, temp)
         self.reset_live_state()
-
         messagebox.showinfo("AIR 기준 저장", f"저장 완료\nGas {gas:,.0f}Ω\n습도 {hum:.1f}%")
         self.update_status("AIR 기준 저장 완료")
-
     def save_air_history_row(self, row, gas_delta_pct, hum_delta):
         now = row["epoch"]
-
         if self.last_reaction_time > 0:
             if now - self.last_reaction_time < AIR_HISTORY_LOCK_AFTER_REACTION_SEC:
                 return
-
         if now - self.last_air_history_time < AIR_HISTORY_INTERVAL_SEC:
             return
-
         hist = {
             "timestamp": row["timestamp"],
             "epoch": row["epoch"],
@@ -2261,27 +1880,21 @@ class App:
             "hum_delta": hum_delta,
             "heater_value": row["heater_value"],
         }
-
         append_dict_csv(AIR_HISTORY_CSV, hist)
         trim_csv(AIR_HISTORY_CSV, MAX_AIR_HISTORY_ROWS)
         self.last_air_history_time = now
-
     def start_train(self, label):
         if self.train_mode:
             messagebox.showinfo("안내", "이미 학습 중입니다.")
             return
-
         recent_air = [
             r for r in list(self.current_rows)[-30:]
             if r.get("recordable") and r.get("gas_ohm", 0) > 0
         ]
-
         if len(recent_air) < 5 and not self.mem_air_gas:
             messagebox.showinfo("안내", "먼저 깨끗한 공기 상태에서 AIR기준저장을 눌러주세요.")
             return
-
         self.reset_live_state()
-
         self.train_mode = "TRAIN"
         self.train_label = label
         self.train_rows = []
@@ -2294,18 +1907,15 @@ class App:
         self.train_start_air_hum = None
         self.train_start_air_temp = None
         self.last_reaction_time = time.time()
-
         self.cards["현재상태"].config(text=f"{label_detail_korean(label)} 학습대기 {TRAIN_READY_SEC:.0f}s", fg=self.yellow)
         self.cards["IPA"].config(text="-")
         self.cards["에탄올"].config(text="-")
         self.update_status(f"{label_detail_korean(label)} 학습 대기 / {TRAIN_READY_SEC:.0f}초 뒤 센서값마다 기록")
-
     def begin_train_record(self):
         recent_air = [
             r for r in list(self.current_rows)[-20:]
             if r.get("recordable") and r.get("gas_ohm", 0) > 0
         ]
-
         if len(recent_air) >= 5:
             self.train_start_air_gas = median([r["gas_ohm"] for r in recent_air[-10:]])
             self.train_start_air_hum = median([r["hum_pct"] for r in recent_air[-10:]])
@@ -2321,7 +1931,6 @@ class App:
             self.update_status("학습 실패 / AIR 기준 없음")
             messagebox.showinfo("안내", "먼저 깨끗한 공기 상태에서 AIR기준저장을 눌러주세요.")
             return
-
         self.train_rows = []
         self.train_phase = "RECORD"
         self.train_record_until = time.time() + TRAIN_RECORD_SEC
@@ -2329,13 +1938,10 @@ class App:
         self.train_saved_count = 0
         self.cards["현재상태"].config(text=f"{label_detail_korean(self.train_label)} 기록시작", fg=self.orange)
         self.update_status(f"{label_detail_korean(self.train_label)} 기록 시작 / 센서값마다 기록 / {TRAIN_RECORD_SEC:.0f}초")
-
     def process_train(self, row):
         if not self.train_mode:
             return
-
         now = time.time()
-
         if self.train_phase == "READY":
             remain = max(0.0, self.train_ready_until - now)
             self.safe_ui(
@@ -2346,32 +1952,25 @@ class App:
             if remain <= 0:
                 self.safe_ui(self.begin_train_record)
             return
-
         if self.train_phase != "RECORD":
             return
-
         if row.get("recordable"):
             self.train_rows.append(row)
-
         remain_float = max(0.0, self.train_record_until - now)
         elapsed_float = max(0.0, TRAIN_RECORD_SEC - remain_float)
-
         self.safe_ui(
             self.cards["현재상태"].config,
             text=f"{label_detail_korean(self.train_label)} 기록중 {elapsed_float:.1f}/{TRAIN_RECORD_SEC:.1f}s ({len(self.train_rows)}개)",
             fg=self.orange,
         )
-
         if remain_float <= 0:
             self.safe_ui(self.finish_train)
-
     def finish_train(self):
         label = self.train_label
         total_rows = len(self.train_rows)
         clean, train_quality = clean_train_rows(self.train_rows)
         saved = 0
         clean_count = len(clean)
-
         if clean_count >= MIN_TRAIN_ROWS:
             feature = extract_live_feature(
                 clean,
@@ -2379,7 +1978,6 @@ class App:
                 self.train_start_air_hum,
                 label=label,
             )
-
             if feature:
                 feature["train_type"] = "ONE_SHOT_3SEC_READY_SENSOR_EACH_READ_CURVE_10SEC"
                 feature["train_quality"] = train_quality
@@ -2390,7 +1988,6 @@ class App:
                 feature["train_ref_temp"] = self.train_start_air_temp
                 save_dict_csv(SAMPLES_CSV, feature)
                 saved = 1
-
         self.train_mode = None
         self.train_label = None
         self.train_rows = []
@@ -2401,9 +1998,7 @@ class App:
         self.train_start_air_gas = None
         self.train_start_air_hum = None
         self.train_start_air_temp = None
-
         self.reset_live_state()
-
         if saved:
             messagebox.showinfo("학습 완료", f"{label_detail_korean(label)} 학습 완료\n3초 대기 후 0초부터 {TRAIN_RECORD_SEC:.0f}초까지 센서값 기준으로 1개 저장\n유효 {clean_count}개 / 전체 {total_rows}개 / 품질 {train_quality}")
             self.cards["현재상태"].config(text="LIVE 재시작", fg=self.blue)
@@ -2411,41 +2006,30 @@ class App:
         else:
             messagebox.showwarning("학습 실패", f"유효 데이터가 부족해서 저장하지 못했습니다.\n유효 {clean_count}개 / 전체 {total_rows}개\n현재 최소 기준 {MIN_TRAIN_ROWS}개")
             self.update_status("학습 실패 / 데이터 부족")
-
     def process_live(self, row):
         if self.train_mode:
             return
-
         if not row.get("recordable"):
             return
-
         if self.mem_air_gas is None or self.mem_air_gas <= 0:
             self.mem_air_gas = row["gas_ohm"]
             self.mem_air_hum = row["hum_pct"]
             self.mem_air_temp = row["temp_c"]
             save_air_memory(self.mem_air_gas, self.mem_air_hum, self.mem_air_temp)
-
         air_gas = self.mem_air_gas
         air_hum = self.mem_air_hum
-
         gas_delta_pct = ((row["gas_ohm"] - air_gas) / air_gas) * 100.0 if air_gas else 0.0
         hum_delta = row["hum_pct"] - air_hum if air_hum is not None else 0.0
-
         self.safe_ui(self.cards["Gas변화"].config, text=f"{gas_delta_pct:+.1f}%")
         self.safe_ui(self.cards["습도변화"].config, text=f"{hum_delta:+.2f}%p")
-
         now = row["epoch"]
-
         self.rolling_rows.append(row)
-
         while self.rolling_rows and now - self.rolling_rows[0]["epoch"] > ROLLING_WINDOW_SEC:
             self.rolling_rows.popleft()
-
         is_stable_air = (
             abs(gas_delta_pct) <= AIR_STABLE_GAS_PCT
             and abs(hum_delta) <= AIR_STABLE_HUM_DELTA
         )
-
         is_active = (
             gas_delta_pct <= ACTIVE_GAS_DROP_PCT
             or (
@@ -2453,31 +2037,25 @@ class App:
                 and gas_delta_pct <= ACTIVE_HUM_NEED_GAS_DROP_PCT
             )
         )
-
         is_return_normal = (
             abs(gas_delta_pct) <= RETURN_GAS_PCT
             and abs(hum_delta) <= RETURN_HUM_DELTA
         )
-
         if is_active:
             self.last_reaction_time = now
-
         if self.live_state == "NORMAL":
             self.result_winner = None
             self.result_pct = {"IPA": 0.0, "ETHANOL": 0.0}
             self.detail_scores = {}
-
             if is_stable_air:
                 self.save_air_history_row(row, gas_delta_pct, hum_delta)
                 self.mem_air_gas = (self.mem_air_gas * (1.0 - AIR_SLOW_ALPHA)) + (row["gas_ohm"] * AIR_SLOW_ALPHA)
                 self.mem_air_hum = (self.mem_air_hum * (1.0 - AIR_SLOW_ALPHA)) + (row["hum_pct"] * AIR_SLOW_ALPHA)
                 self.mem_air_temp = (self.mem_air_temp * (1.0 - AIR_SLOW_ALPHA)) + (row["temp_c"] * AIR_SLOW_ALPHA)
-
             if is_active:
                 self.detect_count += 1
             else:
                 self.detect_count = 0
-
             if self.detect_count >= DETECT_CONFIRM_COUNT:
                 self.live_state = "ANALYZE"
                 self.detect_start_time = now
@@ -2485,61 +2063,47 @@ class App:
                 self.normal_count = 0
                 self.rolling_rows.clear()
                 self.rolling_rows.append(row)
-
                 self.safe_ui(self.cards["현재상태"].config, text="분석중", fg=self.orange)
                 self.safe_ui(self.cards["IPA"].config, text="-")
                 self.safe_ui(self.cards["에탄올"].config, text="-")
                 self.last_state_text = "분석중"
                 return
-
             self.safe_ui(self.cards["현재상태"].config, text="정상범위", fg=self.blue)
             self.safe_ui(self.cards["IPA"].config, text="-")
             self.safe_ui(self.cards["에탄올"].config, text="-")
             self.last_state_text = "정상범위"
             return
-
         if self.live_state == "ANALYZE":
             elapsed = now - self.detect_start_time if self.detect_start_time else 0.0
-
             self.safe_ui(self.cards["현재상태"].config, text=f"분석중 {elapsed:.1f}/{DECISION_DELAY_SEC:.1f}s", fg=self.orange)
             self.safe_ui(self.cards["IPA"].config, text="-")
             self.safe_ui(self.cards["에탄올"].config, text="-")
             self.last_state_text = "분석중"
-
             if elapsed < DECISION_DELAY_SEC:
                 return
-
             clean = clean_rows(self.rolling_rows)
-
             if len(clean) < MIN_CLASSIFY_ROWS:
                 return
-
             feature = extract_live_feature(
                 clean,
                 self.mem_air_gas,
                 self.mem_air_hum,
                 label="LIVE",
             )
-
             if not feature:
                 return
-
             if is_water_only_reaction(feature):
                 self.reset_live_state()
                 return
-
             pct, winner, detail_scores = classify_ipa_ethanol(feature)
-
             if winner in ["학습 데이터 없음", "판별 불가"]:
                 self.safe_ui(self.cards["현재상태"].config, text=winner, fg=self.red)
                 self.safe_ui(self.cards["IPA"].config, text="-")
                 self.safe_ui(self.cards["에탄올"].config, text="-")
                 self.last_state_text = winner
                 return
-
             water_mix_suspect = is_water_mix_suspect(feature, pct)
             water_mix_region = is_water_mix_region(feature)
-
             if water_mix_suspect and elapsed < WATER_MIX_DECISION_DELAY_SEC:
                 self.safe_ui(
                     self.cards["현재상태"].config,
@@ -2548,7 +2112,6 @@ class App:
                 )
                 self.last_state_text = "물혼합 전용분석"
                 return
-
             if water_mix_region:
                 pct, winner, water_pct, rule_pct, water_counts = classify_water_mix_priority(feature, pct)
                 detail_scores = {
@@ -2559,48 +2122,38 @@ class App:
                 }
             else:
                 pct, winner = adjust_for_water_mixed_ipa(feature, pct)
-
             self.result_winner = winner
             self.result_pct = pct
             self.detail_scores = detail_scores
             self.live_state = "RESULT"
             self.normal_count = 0
-
             self.safe_ui(self.cards["IPA"].config, text=f"{pct['IPA']:.1f}%")
             self.safe_ui(self.cards["에탄올"].config, text=f"{pct['ETHANOL']:.1f}%")
-
             color = self.yellow if winner == "IPA" else self.green
             self.last_state_text = f"{label_korean(winner)} {pct[winner]:.1f}%"
             self.safe_ui(self.cards["현재상태"].config, text=self.last_state_text, fg=color)
             return
-
         if self.live_state == "RESULT":
             winner = self.result_winner
             pct = self.result_pct
-
             if winner:
                 self.safe_ui(self.cards["IPA"].config, text=f"{pct['IPA']:.1f}%")
                 self.safe_ui(self.cards["에탄올"].config, text=f"{pct['ETHANOL']:.1f}%")
-
                 color = self.yellow if winner == "IPA" else self.green
                 self.last_state_text = f"{label_korean(winner)} {pct[winner]:.1f}%"
                 self.safe_ui(self.cards["현재상태"].config, text=self.last_state_text, fg=color)
-
             if is_return_normal:
                 self.normal_count += 1
             else:
                 self.normal_count = 0
-
             if self.normal_count >= NORMAL_RETURN_COUNT:
                 self.safe_ui(self.reset_live_state)
                 return
-
     def show_data_manager(self):
         win = tk.Toplevel(self.root)
         win.title("데이터 관리")
         win.geometry("1580x820")
         win.configure(bg=self.bg)
-
         tk.Label(
             win,
             text=f"학습 데이터: {os.path.abspath(SAMPLES_CSV)}",
@@ -2608,7 +2161,6 @@ class App:
             fg=self.text,
             font=("NanumGothic", 13, "bold"),
         ).pack(pady=8)
-
         columns = (
             "check", "id", "timestamp", "label", "group", "train_type", "train_quality", "train_total_rows", "train_clean_rows", "duration_sec", "count",
             "gas_now_pct", "gas_min_pct", "gas_avg_pct", "gas_end_pct",
@@ -2620,12 +2172,9 @@ class App:
             "gas_speed_5_8s", "gas_speed_8_10s", "gas_extra_drop_8_10s",
             "late10_gas_per_hum", "temp_avg", "press_avg"
         )
-
         topbar = tk.Frame(win, bg=self.bg)
         topbar.pack(fill="x", padx=10, pady=4)
-
         tk.Label(topbar, text="라벨별 삭제:", bg=self.bg, fg=self.text, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
-
         label_names = [txt for txt, _ in TRAIN_BUTTONS]
         label_values = [lab for _, lab in TRAIN_BUTTONS]
         label_display_to_value = {txt: lab for txt, lab in TRAIN_BUTTONS}
@@ -2633,58 +2182,45 @@ class App:
         label_combo.pack(side="left", padx=4)
         if label_names:
             label_combo.current(0)
-
         frame = tk.Frame(win, bg=self.bg)
         frame.pack(fill="both", expand=True, padx=10, pady=8)
-
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         tree.pack(side="left", fill="both", expand=True)
-
         scroll_y = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         scroll_y.pack(side="right", fill="y")
         tree.configure(yscrollcommand=scroll_y.set)
-
         scroll_x = ttk.Scrollbar(win, orient="horizontal", command=tree.xview)
         scroll_x.pack(fill="x", padx=10)
         tree.configure(xscrollcommand=scroll_x.set)
-
         checked = set()
         table_rows = []
-
         for c in columns:
             tree.heading(c, text=c)
             width = 70 if c == "check" else 112
             tree.column(c, width=width, anchor="center", stretch=False)
-
         def fmt(v):
             try:
                 return f"{float(v):.2f}"
             except Exception:
                 return v
-
         def row_values(i, r):
             rr = dict(r)
             rr["group"] = label_group(rr.get("label", ""))
             rr["check"] = "☑" if i in checked else "☐"
             return [fmt(rr.get(c, "")) for c in columns]
-
         def load_table():
             nonlocal table_rows
             checked.clear()
             for item in tree.get_children():
                 tree.delete(item)
-
             table_rows = load_csv(SAMPLES_CSV)
-
             for i, r in enumerate(table_rows):
                 tree.insert("", "end", iid=str(i), values=row_values(i, r))
-
         def refresh_checks():
             for item in tree.get_children():
                 idx = int(item)
                 if idx < len(table_rows):
                     tree.item(item, values=row_values(idx, table_rows[idx]))
-
         def toggle_item(item):
             if not item:
                 return
@@ -2694,7 +2230,6 @@ class App:
             else:
                 checked.add(idx)
             refresh_checks()
-
         def on_click(event):
             region = tree.identify("region", event.x, event.y)
             if region != "cell":
@@ -2703,7 +2238,6 @@ class App:
             col = tree.identify_column(event.x)
             if col == "#1" and item:
                 toggle_item(item)
-
         def toggle_selected():
             sel = tree.selection()
             if not sel:
@@ -2715,118 +2249,91 @@ class App:
                 else:
                     checked.add(idx)
             refresh_checks()
-
         def check_all_visible():
             for item in tree.get_children():
                 checked.add(int(item))
             refresh_checks()
-
         def uncheck_all():
             checked.clear()
             refresh_checks()
-
         def delete_checked():
             if not checked:
                 messagebox.showinfo("안내", "체크된 데이터가 없습니다.")
                 return
-
             if not messagebox.askyesno("체크 삭제", f"체크된 {len(checked)}개 데이터를 삭제할까요?"):
                 return
-
             rows = load_csv(SAMPLES_CSV)
             for idx in sorted(checked, reverse=True):
                 if 0 <= idx < len(rows):
                     del rows[idx]
-
             write_csv(SAMPLES_CSV, rows)
             load_table()
             self.update_status("체크 데이터 삭제 완료")
-
         def delete_selected_rows():
             sel = tree.selection()
             if not sel:
                 messagebox.showinfo("안내", "선택된 행이 없습니다.")
                 return
-
             if not messagebox.askyesno("선택 삭제", f"선택된 {len(sel)}개 행을 삭제할까요?"):
                 return
-
             rows = load_csv(SAMPLES_CSV)
             idxs = sorted([int(x) for x in sel], reverse=True)
             for idx in idxs:
                 if 0 <= idx < len(rows):
                     del rows[idx]
-
             write_csv(SAMPLES_CSV, rows)
             load_table()
             self.update_status("선택 행 삭제 완료")
-
         def delete_label_rows():
             display = label_combo.get()
             label = label_display_to_value.get(display)
             if not label:
                 return
-
             rows = load_csv(SAMPLES_CSV)
             matched = [r for r in rows if r.get("label") == label]
-
             if not matched:
                 messagebox.showinfo("안내", f"{display} 데이터가 없습니다.")
                 return
-
             if not messagebox.askyesno("라벨별 삭제", f"{display} 학습 데이터 {len(matched)}개를 삭제할까요?"):
                 return
-
             rows = [r for r in rows if r.get("label") != label]
             write_csv(SAMPLES_CSV, rows)
             load_table()
             self.update_status(f"{display} 데이터 삭제 완료")
-
         def delete_group_rows(group_name, title):
             rows = load_csv(SAMPLES_CSV)
             matched = [r for r in rows if label_group(r.get("label", "")) == group_name]
-
             if not matched:
                 messagebox.showinfo("안내", f"{title} 그룹 데이터가 없습니다.")
                 return
-
             if not messagebox.askyesno("그룹 삭제", f"{title} 그룹 데이터 {len(matched)}개를 삭제할까요?"):
                 return
-
             rows = [r for r in rows if label_group(r.get("label", "")) != group_name]
             write_csv(SAMPLES_CSV, rows)
             load_table()
             self.update_status(f"{title} 그룹 데이터 삭제 완료")
-
         def clear_all():
             if not messagebox.askyesno("전체 삭제", "학습 데이터를 전부 삭제할까요?"):
                 return
-
             write_csv(SAMPLES_CSV, [])
             load_table()
             self.update_status("학습 데이터 전체 삭제")
-
         tree.bind("<Button-1>", on_click)
         tree.bind("<Double-1>", lambda e: toggle_item(tree.identify_row(e.y)))
-
         btns = tk.Frame(win, bg=self.bg)
         btns.pack(fill="x", padx=10, pady=8)
-
         tk.Button(btns, text="새로고침", command=load_table, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
         tk.Button(btns, text="선택행 체크/해제", command=toggle_selected, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
         tk.Button(btns, text="전체체크", command=check_all_visible, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
         tk.Button(btns, text="체크해제", command=uncheck_all, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
         tk.Button(btns, text="체크삭제", command=delete_checked, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
         tk.Button(btns, text="선택행삭제", command=delete_selected_rows, font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
-
         tk.Button(topbar, text="선택 라벨 삭제", command=delete_label_rows, font=("NanumGothic", 11, "bold")).pack(side="left", padx=6)
         tk.Button(topbar, text="IPA 그룹 삭제", command=lambda: delete_group_rows("IPA", "IPA"), font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
         tk.Button(topbar, text="에탄올 그룹 삭제", command=lambda: delete_group_rows("ETHANOL", "에탄올"), font=("NanumGothic", 11, "bold")).pack(side="left", padx=4)
         tk.Button(topbar, text="전체삭제", command=clear_all, font=("NanumGothic", 11, "bold")).pack(side="right", padx=4)
         tk.Button(btns, text="닫기", command=win.destroy, font=("NanumGothic", 11, "bold")).pack(side="right", padx=5)
-
         load_table()
-
     def loop(self):
         try:
             sensor_init()
@@ -2835,120 +2342,91 @@ class App:
         except Exception as e:
             self.safe_ui(self.update_status, f"센서 오류: {e}")
             return
-
         raw_trim_counter = 0
-
         while self.running:
             try:
                 row = read_sensor()
                 self.current_rows.append(row)
-
                 append_dict_csv(RAW_CSV, row)
-
                 raw_trim_counter += 1
-
                 if raw_trim_counter >= 1000:
                     raw_trim_counter = 0
                     trim_csv(RAW_CSV, MAX_RAW_ROWS)
-
                 if self.train_mode:
                     self.process_train(row)
                 else:
                     self.process_live(row)
-
                 self.safe_ui(self.cards["가스저항"].config, text=f"{row['gas_ohm']:,.0f} Ω")
-
                 now_t = time.time()
                 if now_t - self.last_status_update_epoch >= STATUS_UPDATE_SEC:
                     self.last_status_update_epoch = now_t
                     self.safe_ui(self.update_status)
-
             except Exception as e:
                 self.safe_ui(self.status_main.config, text=f"오류: {e}")
                 self.safe_ui(self.cards["현재상태"].config, text="오류", fg=self.red)
-
             time.sleep(LOOP_SLEEP_SEC)
-
     def update_ui(self):
         rows = list(self.current_rows)
-
         if rows:
             self.ax_gas.clear()
             self.ax_hum.clear()
             self.style_axis(self.ax_gas)
             self.style_axis(self.ax_hum)
-
             now = time.time()
             plot_rows = [r for r in rows if now - r["epoch"] <= ROLLING_WINDOW_SEC]
-
             if plot_rows and self.mem_air_gas and self.mem_air_hum is not None:
                 t0 = plot_rows[0]["epoch"]
                 xs = [r["epoch"] - t0 for r in plot_rows]
-
                 gas_pct = [
                     ((r["gas_ohm"] - self.mem_air_gas) / self.mem_air_gas) * 100.0
                     for r in plot_rows
                 ]
-
                 hum_delta = [
                     r["hum_pct"] - self.mem_air_hum
                     for r in plot_rows
                 ]
-
                 self.ax_gas.plot(xs, gas_pct, linewidth=2.5)
                 self.ax_gas.axhline(0, linestyle="--", linewidth=1.0)
                 self.ax_gas.axhline(ACTIVE_GAS_DROP_PCT, linestyle="--", linewidth=1.0)
                 self.ax_gas.set_title("AIR 기준 Gas 변화율")
                 self.ax_gas.set_xlabel("최근 시간 (초)")
                 self.ax_gas.set_ylabel("Gas 변화율 (%)")
-
                 self.ax_hum.plot(xs, hum_delta, linewidth=2.5)
                 self.ax_hum.axhline(0, linestyle="--", linewidth=1.0)
                 self.ax_hum.axhline(ACTIVE_HUM_RISE, linestyle="--", linewidth=1.0)
                 self.ax_hum.set_title("AIR 기준 습도 변화량")
                 self.ax_hum.set_xlabel("최근 시간 (초)")
                 self.ax_hum.set_ylabel("습도 변화량 (%p)")
-
             else:
                 t0 = rows[0]["epoch"]
                 xs = [r["epoch"] - t0 for r in rows[-100:]]
                 gas = [r["gas_ohm"] for r in rows[-100:]]
                 hum = [r["hum_pct"] for r in rows[-100:]]
-
                 self.ax_gas.plot(xs, gas, linewidth=2.0)
                 self.ax_gas.set_title("Gas 원본")
                 self.ax_gas.set_xlabel("시간 (초)")
                 self.ax_gas.set_ylabel("Gas 저항 (Ω)")
-
                 self.ax_hum.plot(xs, hum, linewidth=2.0)
                 self.ax_hum.set_title("습도 원본")
                 self.ax_hum.set_xlabel("시간 (초)")
                 self.ax_hum.set_ylabel("습도 (%)")
-
             self.fig.suptitle(
                 "BME688 IPA / 에탄올 판별",
                 color=self.text,
                 fontsize=15,
                 fontweight="bold",
             )
-
             self.fig.tight_layout()
             self.canvas.draw_idle()
-
         if self.running:
             self.root.after(UI_UPDATE_MS, self.update_ui)
-
     def close(self):
         self.running = False
-
         try:
             spi.close()
         except Exception:
             pass
-
         self.root.destroy()
-
-
 if __name__ == "__main__":
     root = tk.Tk()
     app = App(root)
