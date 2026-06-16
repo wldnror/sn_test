@@ -1116,6 +1116,31 @@ def group_stats_for_feature(rows, key):
     if not vals:
         return 0.0, 0.0, 0
     return mean(vals), stdev(vals), len(vals)
+# --- 물혼합 feature 교란(confound) 보정 ---
+# 습도 "절대 크기"는 알코올 종류가 아니라 "물의 양"을 반영한다.
+# 학습 세트에서 ETHANOL_WATER가 우연히 습도가 컸던 탓에 모델이 "습도 크면 에탄올"로
+# 외워서, 물 많은 IPA를 에탄올로 오인했다. → 습도 절대크기 feature를 강하게 억제한다.
+WATER_HUM_MAGNITUDE_SCALE = 0.15   # 습도 절대크기(= 물 양 confound)
+WATER_HUM_COUPLED_SCALE = 0.5      # 습도가 분모/분자로 끼어 물 양에 끌려가는 비율
+WATER_Z_CLAMP = 2.5                # 분포 밖(OOD) feature가 판정을 지배하지 못하게 z 윈저화
+WATER_OOD_Z = 2.5                  # |z|가 이보다 크면 그 feature는 학습범위 밖
+WATER_OOD_FRACTION = 0.25          # OOD feature 비율이 이 이상이면 측정 자체가 OOD
+def water_feature_category_weight(key):
+    if (key.startswith("rs_hum_rise_")
+            or key.startswith("hum_rise_")
+            or key.startswith("rs_hum_delta_")
+            or key in ("rs_early_hum_1_3_rise", "rs_mid_hum_2_5_rise",
+                       "rs_early_hum_1_3_speed", "rs_mid_hum_2_5_speed")):
+        return WATER_HUM_MAGNITUDE_SCALE
+    if "gas_per_hum" in key or key.startswith("hum_gas_ratio"):
+        return WATER_HUM_COUPLED_SCALE
+    return 1.0
+def clamp_water_z(z):
+    if z > WATER_Z_CLAMP:
+        return WATER_Z_CLAMP
+    if z < -WATER_Z_CLAMP:
+        return -WATER_Z_CLAMP
+    return z
 def build_dynamic_water_model():
     ipa_rows, eth_rows = water_group_rows()
     counts = {"IPA": len(ipa_rows), "ETHANOL": len(eth_rows)}
@@ -1148,13 +1173,16 @@ def build_dynamic_water_model():
             / max(1, len(ipa_z) + len(eth_z) - 2)
         )
         cohen_d = abs(ipa_mean - eth_mean) / pooled if pooled > 0 else 0.0
+        # 습도 절대크기(물 양 confound) feature는 카테고리 배율로 강하게 억제한다.
+        weight = cohen_d * water_feature_category_weight(key)
         model[key] = {
             "mu": mu,
             "sigma": sigma,
             "ipa_mean": ipa_mean,
             "eth_mean": eth_mean,
             "cohen_d": cohen_d,
-            "weight": cohen_d,
+            "cat_scale": water_feature_category_weight(key),
+            "weight": weight,
         }
     if not model or sum(m["weight"] for m in model.values()) <= 0:
         return None, counts
@@ -1164,9 +1192,10 @@ def dynamic_distance_to_center(feature, model, side):
     total = 0.0
     wsum = 0.0
     for key, m in model["features"].items():
-        z = (dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"]
+        # OOD feature가 판정을 지배하지 못하게 z를 ±WATER_Z_CLAMP로 윈저화한다.
+        z = clamp_water_z((dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"])
         center = m["ipa_mean"] if side == "IPA" else m["eth_mean"]
-        d = min((z - center) ** 2, 36.0)  # z=±6 상한
+        d = min((z - center) ** 2, 36.0)
         total += d * m["weight"]
         wsum += m["weight"]
     if wsum <= 0:
@@ -1176,8 +1205,8 @@ def dynamic_distance_to_row(feature, sample, model):
     total = 0.0
     wsum = 0.0
     for key, m in model["features"].items():
-        zc = (dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"]
-        zs = (dynamic_feature_value(sample, key) - m["mu"]) / m["sigma"]
+        zc = clamp_water_z((dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"])
+        zs = clamp_water_z((dynamic_feature_value(sample, key) - m["mu"]) / m["sigma"])
         d = min((zc - zs) ** 2, 36.0)
         total += d * m["weight"]
         wsum += m["weight"]
@@ -1231,31 +1260,48 @@ def classify_water_mix_dynamic_distance(feature):
     else:
         out = {"IPA": round(ipa / total * 100.0, 1), "ETHANOL": round(eth / total * 100.0, 1)}
     winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
-    # --- 진단: 분리 기여 상위 feature가 이번 측정값을 어느 쪽으로 투표했는지 ---
+    # --- OOD(학습 분포 밖) 감지: |z|>WATER_OOD_Z 인 feature 비율 + 최근접 이웃 거리 ---
+    ood_count = 0
+    ood_total = 0
+    for key, m in model["features"].items():
+        z = (dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"]
+        if abs(z) > WATER_OOD_Z:
+            ood_count += 1
+        ood_total += 1
+    ood_frac = (ood_count / ood_total) if ood_total else 0.0
+    nn_dist = neighbors[0][0] if neighbors else 999999.0
+    is_ood = ood_frac >= WATER_OOD_FRACTION
+    # --- 진단: 상위 feature가 이번 측정값을 어느 쪽으로 투표했는지(억제 가중치 반영) ---
     top = sorted(model["features"].items(), key=lambda kv: kv[1]["weight"], reverse=True)[:8]
     feat_votes = []
     for key, m in top:
         z = (dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"]
-        di = abs(z - m["ipa_mean"])
-        de = abs(z - m["eth_mean"])
+        zc = clamp_water_z(z)
+        di = abs(zc - m["ipa_mean"])
+        de = abs(zc - m["eth_mean"])
         vote = "IPA" if di < de else "ETH"
-        feat_votes.append((key, m["cohen_d"], z, m["ipa_mean"], m["eth_mean"], vote))
+        feat_votes.append((key, m["weight"], z, m["ipa_mean"], m["eth_mean"], vote))
     # --- 콘솔 진단 출력 (판정마다 1회) ---
     try:
-        print("\n[물혼합 진단] 판정={}  (IPA {}% / ETH {}%)".format(winner, out["IPA"], out["ETHANOL"]), flush=True)
+        flag = "   <<학습범위 밖(OOD)>>" if is_ood else ""
+        print("\n[물혼합 진단] 판정={}  (IPA {}% / ETH {}%){}".format(winner, out["IPA"], out["ETHANOL"], flag), flush=True)
+        if is_ood:
+            print("  [OOD] feature {}/{}개가 |z|>{} -> 이 측정은 학습 분포 밖. 이 조건을 학습에 추가 필요.".format(
+                ood_count, ood_total, WATER_OOD_Z), flush=True)
         print("  prototype(중심): IPA_d={:.2f} ETH_d={:.2f}  ->  IPA {}% / ETH {}%".format(
             proto_ipa_dist, proto_eth_dist, proto_pct["IPA"], proto_pct["ETHANOL"]), flush=True)
-        print("  knn(k={}):                          ->  IPA {}% / ETH {}%".format(
-            k, knn_pct["IPA"], knn_pct["ETHANOL"]), flush=True)
+        print("  knn(k={}): 최근접 d={:.2f}              ->  IPA {}% / ETH {}%".format(
+            k, nn_dist, knn_pct["IPA"], knn_pct["ETHANOL"]), flush=True)
         print("  가까운 이웃 5개 (어느 라벨에 끌렸나):", flush=True)
         for i, (d, lab, sid) in enumerate(neighbors[:5], 1):
             print("    {}. {:14s} d={:.2f}  id={}".format(i, lab, d, sid), flush=True)
-        print("  분리기여 top feature  [측정값z / IPA중심 / ETH중심 / 투표]:", flush=True)
-        for key, cd, z, im, em, vote in feat_votes:
-            print("    {:22s} d={:.2f}  z={:+.2f}  IPA={:+.2f} ETH={:+.2f}  -> {}".format(
-                key, cd, z, im, em, vote), flush=True)
+        print("  상위 feature  [측정값z / IPA중심 / ETH중심 / 투표 / 가중치] (가중치=억제반영):", flush=True)
+        for key, w, z, im, em, vote in feat_votes:
+            mark = " (OOD)" if abs(z) > WATER_OOD_Z else ""
+            print("    {:22s} w={:.2f}  z={:+.2f}{}  IPA={:+.2f} ETH={:+.2f}  -> {}".format(
+                key, w, z, mark, im, em, vote), flush=True)
         iv = sum(1 for *_, v in feat_votes if v == "IPA")
-        print("  top8 feature 투표: IPA {} / ETH {}".format(iv, len(feat_votes) - iv), flush=True)
+        print("  상위 feature 투표: IPA {} / ETH {}".format(iv, len(feat_votes) - iv), flush=True)
     except Exception:
         pass
     debug = {
@@ -1266,10 +1312,13 @@ def classify_water_mix_dynamic_distance(feature):
         "knn_ipa_pct": knn_pct["IPA"],
         "knn_eth_pct": knn_pct["ETHANOL"],
         "neighbors": [(round(d, 3), lab) for d, lab, _ in neighbors[:5]],
+        "ood": is_ood,
+        "ood_frac": round(ood_frac, 2),
+        "nn_dist": round(nn_dist, 3),
     }
-    for idx, (key, cd, z, im, em, vote) in enumerate(feat_votes[:6], 1):
+    for idx, (key, w, z, im, em, vote) in enumerate(feat_votes[:6], 1):
         debug[f"top{idx}"] = key
-        debug[f"top{idx}_d"] = round(cd, 2)
+        debug[f"top{idx}_w"] = round(w, 2)
         debug[f"top{idx}_vote"] = vote
     return out, winner, counts, debug
 def is_water_mix_region(feature):
