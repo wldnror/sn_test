@@ -1121,43 +1121,54 @@ def build_dynamic_water_model():
     counts = {"IPA": len(ipa_rows), "ETHANOL": len(eth_rows)}
     if len(ipa_rows) < 2 or len(eth_rows) < 2:
         return None, counts
+    all_rows = ipa_rows + eth_rows
     model = {}
     for key in DYNAMIC_WATER_FEATURES:
-        ipa_mean, ipa_std, ipa_n = group_stats_for_feature(ipa_rows, key)
-        eth_mean, eth_std, eth_n = group_stats_for_feature(eth_rows, key)
-        if ipa_n <= 0 or eth_n <= 0:
+        # 두 클래스를 합친 분포로 표준화(z-score)한다.
+        # 단위가 제각각인 습도/Gas/비율 feature를 같은 잣대로 비교하기 위함.
+        all_vals = [dynamic_feature_value(r, key) for r in all_rows]
+        all_vals = [x for x in all_vals if math.isfinite(x)]
+        if len(all_vals) < 2:
             continue
-        sep = abs(ipa_mean - eth_mean)
-        spread = ipa_std + eth_std + dynamic_feature_floor(key)
-        raw_weight = sep / spread
-        # 겹치는 feature는 자연스럽게 낮게, 잘 갈리는 feature는 높게.
-        # 너무 큰 하나의 feature가 모든 것을 지배하지 않게 상한을 둔다.
-        weight = max(0.02, min(6.0, raw_weight)) * dynamic_feature_base_importance(key)  # [수정2] cap 4→6
-        if sep < dynamic_feature_floor(key) * 0.45:
-            weight *= 0.25
+        mu = mean(all_vals)
+        sigma = stdev(all_vals)
+        if sigma <= 1e-9:
+            continue  # 변화가 없는 feature는 정보가 없으므로 제외
+        ipa_z = [(dynamic_feature_value(r, key) - mu) / sigma for r in ipa_rows]
+        eth_z = [(dynamic_feature_value(r, key) - mu) / sigma for r in eth_rows]
+        ipa_mean = mean(ipa_z)
+        eth_mean = mean(eth_z)
+        ipa_std = stdev(ipa_z)
+        eth_std = stdev(eth_z)
+        # 가중치 = 실제 데이터에서 측정한 Cohen's d(분리도).
+        # 하드코딩 가정값을 쓰지 않는다 → 겹치는 feature는 d≈0이라 자동으로 빠지고,
+        # 실제로 잘 갈리는 feature가 비례해서 더 큰 표를 갖는다.
+        pooled = math.sqrt(
+            ((len(ipa_z) - 1) * ipa_std ** 2 + (len(eth_z) - 1) * eth_std ** 2)
+            / max(1, len(ipa_z) + len(eth_z) - 2)
+        )
+        cohen_d = abs(ipa_mean - eth_mean) / pooled if pooled > 0 else 0.0
         model[key] = {
+            "mu": mu,
+            "sigma": sigma,
             "ipa_mean": ipa_mean,
             "eth_mean": eth_mean,
-            "ipa_std": ipa_std,
-            "eth_std": eth_std,
-            "sep": sep,
-            "spread": spread,
-            "weight": weight,
+            "cohen_d": cohen_d,
+            "weight": cohen_d,
         }
+    if not model or sum(m["weight"] for m in model.values()) <= 0:
+        return None, counts
     return {"features": model, "ipa_rows": ipa_rows, "eth_rows": eth_rows}, counts
 def dynamic_distance_to_center(feature, model, side):
+    # 표준화 공간에서의 가중 제곱거리(작을수록 그 클래스 중심에 가까움).
     total = 0.0
     wsum = 0.0
     for key, m in model["features"].items():
-        cur = dynamic_feature_value(feature, key)
+        z = (dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"]
         center = m["ipa_mean"] if side == "IPA" else m["eth_mean"]
-        spread = m["spread"]
-        w = m["weight"]
-        # 거리 자체는 spread로 정규화해서, 단위가 다른 습도/Gas/비율이 같이 비교되게 한다.
-        d = abs(cur - center) / max(dynamic_feature_floor(key), spread)
-        d = min(d, 6.0)
-        total += d * w
-        wsum += w
+        d = min((z - center) ** 2, 36.0)  # z=±6 상한
+        total += d * m["weight"]
+        wsum += m["weight"]
     if wsum <= 0:
         return 999999.0
     return total / wsum
@@ -1165,20 +1176,18 @@ def dynamic_distance_to_row(feature, sample, model):
     total = 0.0
     wsum = 0.0
     for key, m in model["features"].items():
-        cur = dynamic_feature_value(feature, key)
-        sv = dynamic_feature_value(sample, key)
-        spread = m["spread"]
-        w = m["weight"]
-        d = abs(cur - sv) / max(dynamic_feature_floor(key), spread)
-        d = min(d, 6.0)
-        total += d * w
-        wsum += w
+        zc = (dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"]
+        zs = (dynamic_feature_value(sample, key) - m["mu"]) / m["sigma"]
+        d = min((zc - zs) ** 2, 36.0)
+        total += d * m["weight"]
+        wsum += m["weight"]
     if wsum <= 0:
         return 999999.0
     return total / wsum
 def pct_from_two_distances(ipa_dist, eth_dist):
-    ipa_score = 1.0 / (1.0 + max(0.0, ipa_dist))
-    eth_score = 1.0 / (1.0 + max(0.0, eth_dist))
+    # 가중 제곱 z-거리 → 가우시안 우도로 확률화.
+    ipa_score = math.exp(-0.5 * min(60.0, max(0.0, ipa_dist)))
+    eth_score = math.exp(-0.5 * min(60.0, max(0.0, eth_dist)))
     total = ipa_score + eth_score
     if total <= 0:
         return {"IPA": 50.0, "ETHANOL": 50.0}
@@ -1190,25 +1199,16 @@ def classify_water_mix_dynamic_distance(feature):
     model, counts = build_dynamic_water_model()
     if not model:
         return None, None, counts, {}
+    # 1) 표준화 가중 최근접중심(prototype): 검증에서 가장 안정적이었던 축.
     proto_ipa_dist = dynamic_distance_to_center(feature, model, "IPA")
     proto_eth_dist = dynamic_distance_to_center(feature, model, "ETHANOL")
     proto_pct = pct_from_two_distances(proto_ipa_dist, proto_eth_dist)
-    ipa_knn = 0.0
-    eth_knn = 0.0
-    ipa_dists = []
-    eth_dists = []
-    for r in model["ipa_rows"]:
-        d = dynamic_distance_to_row(feature, r, model)
-        ipa_dists.append(d)
-    for r in model["eth_rows"]:
-        d = dynamic_distance_to_row(feature, r, model)
-        eth_dists.append(d)
-    # 모든 샘플을 보되, 가까운 샘플이 점수를 더 많이 가져간다.
-    # 작은 데이터에서는 평균 중심만 보면 튀는 테스트가 흔들리므로 KNN을 같이 섞는다.
-    for d in sorted(ipa_dists)[:max(1, min(4, len(ipa_dists)) )]:
-        ipa_knn += math.exp(-1.65 * d)
-    for d in sorted(eth_dists)[:max(1, min(4, len(eth_dists)) )]:
-        eth_knn += math.exp(-1.65 * d)
+    # 2) 표준화 가중 KNN: 작은 데이터에서 중심만 보면 튀므로 가까운 개별 샘플도 섞는다.
+    ipa_dists = sorted(dynamic_distance_to_row(feature, r, model) for r in model["ipa_rows"])
+    eth_dists = sorted(dynamic_distance_to_row(feature, r, model) for r in model["eth_rows"])
+    k = max(1, min(3, len(ipa_dists), len(eth_dists)))
+    ipa_knn = sum(math.exp(-0.5 * min(60.0, d)) for d in ipa_dists[:k])
+    eth_knn = sum(math.exp(-0.5 * min(60.0, d)) for d in eth_dists[:k])
     if ipa_knn + eth_knn > 0:
         knn_pct = {
             "IPA": round(ipa_knn / (ipa_knn + eth_knn) * 100.0, 1),
@@ -1216,35 +1216,16 @@ def classify_water_mix_dynamic_distance(feature):
         }
     else:
         knn_pct = {"IPA": 50.0, "ETHANOL": 50.0}
-    # 최종: 학습 평균곡선 60%, 가까운 개별 샘플 40%.
-    ipa = proto_pct["IPA"] * 0.60 + knn_pct["IPA"] * 0.40
-    eth = proto_pct["ETHANOL"] * 0.60 + knn_pct["ETHANOL"] * 0.40
-    # 학습 데이터에서 실제로 잘 갈리는 상위 feature를 약간 더 반영한다.
-    top = sorted(model["features"].items(), key=lambda kv: kv[1]["weight"], reverse=True)[:10]
-    top_ipa = 0.0
-    top_eth = 0.0
-    top_w = 0.0
-    for key, m in top:
-        cur = dynamic_feature_value(feature, key)
-        di = abs(cur - m["ipa_mean"]) / max(dynamic_feature_floor(key), m["spread"])
-        de = abs(cur - m["eth_mean"]) / max(dynamic_feature_floor(key), m["spread"])
-        w = m["weight"]
-        if di < de:
-            top_ipa += w
-        elif de < di:
-            top_eth += w
-        top_w += w
-    if top_w > 0:
-        ipa += (top_ipa / top_w) * 8.0
-        eth += (top_eth / top_w) * 8.0
-    ipa = max(0.0, ipa)
-    eth = max(0.0, eth)
+    # 3) 최종: 중심 70% + 가까운 개별 샘플 30%.
+    ipa = proto_pct["IPA"] * 0.70 + knn_pct["IPA"] * 0.30
+    eth = proto_pct["ETHANOL"] * 0.70 + knn_pct["ETHANOL"] * 0.30
     total = ipa + eth
     if total <= 0:
         out = {"IPA": 50.0, "ETHANOL": 50.0}
     else:
         out = {"IPA": round(ipa / total * 100.0, 1), "ETHANOL": round(eth / total * 100.0, 1)}
     winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
+    top = sorted(model["features"].items(), key=lambda kv: kv[1]["weight"], reverse=True)[:6]
     debug = {
         "proto_ipa_dist": round(proto_ipa_dist, 4),
         "proto_eth_dist": round(proto_eth_dist, 4),
@@ -1252,11 +1233,10 @@ def classify_water_mix_dynamic_distance(feature):
         "proto_eth_pct": proto_pct["ETHANOL"],
         "knn_ipa_pct": knn_pct["IPA"],
         "knn_eth_pct": knn_pct["ETHANOL"],
-        "top_weight_sum": round(top_w, 3),
     }
-    for idx, (key, m) in enumerate(top[:6], 1):
+    for idx, (key, m) in enumerate(top, 1):
         debug[f"top{idx}"] = key
-        debug[f"top{idx}_weight"] = round(m["weight"], 3)
+        debug[f"top{idx}_d"] = round(m["cohen_d"], 2)
     return out, winner, counts, debug
 def is_water_mix_region(feature):
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
