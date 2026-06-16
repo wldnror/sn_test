@@ -1203,9 +1203,15 @@ def classify_water_mix_dynamic_distance(feature):
     proto_ipa_dist = dynamic_distance_to_center(feature, model, "IPA")
     proto_eth_dist = dynamic_distance_to_center(feature, model, "ETHANOL")
     proto_pct = pct_from_two_distances(proto_ipa_dist, proto_eth_dist)
-    # 2) 표준화 가중 KNN: 작은 데이터에서 중심만 보면 튀므로 가까운 개별 샘플도 섞는다.
-    ipa_dists = sorted(dynamic_distance_to_row(feature, r, model) for r in model["ipa_rows"])
-    eth_dists = sorted(dynamic_distance_to_row(feature, r, model) for r in model["eth_rows"])
+    # 2) 표준화 가중 KNN: 이웃을 label과 함께 보관(진단용).
+    neighbors = []
+    for r in model["ipa_rows"]:
+        neighbors.append((dynamic_distance_to_row(feature, r, model), "IPA_WATER", r.get("id", "")))
+    for r in model["eth_rows"]:
+        neighbors.append((dynamic_distance_to_row(feature, r, model), "ETHANOL_WATER", r.get("id", "")))
+    neighbors.sort(key=lambda x: x[0])
+    ipa_dists = [d for d, lab, _ in neighbors if lab == "IPA_WATER"]
+    eth_dists = [d for d, lab, _ in neighbors if lab == "ETHANOL_WATER"]
     k = max(1, min(3, len(ipa_dists), len(eth_dists)))
     ipa_knn = sum(math.exp(-0.5 * min(60.0, d)) for d in ipa_dists[:k])
     eth_knn = sum(math.exp(-0.5 * min(60.0, d)) for d in eth_dists[:k])
@@ -1225,7 +1231,33 @@ def classify_water_mix_dynamic_distance(feature):
     else:
         out = {"IPA": round(ipa / total * 100.0, 1), "ETHANOL": round(eth / total * 100.0, 1)}
     winner = "IPA" if out["IPA"] >= out["ETHANOL"] else "ETHANOL"
-    top = sorted(model["features"].items(), key=lambda kv: kv[1]["weight"], reverse=True)[:6]
+    # --- 진단: 분리 기여 상위 feature가 이번 측정값을 어느 쪽으로 투표했는지 ---
+    top = sorted(model["features"].items(), key=lambda kv: kv[1]["weight"], reverse=True)[:8]
+    feat_votes = []
+    for key, m in top:
+        z = (dynamic_feature_value(feature, key) - m["mu"]) / m["sigma"]
+        di = abs(z - m["ipa_mean"])
+        de = abs(z - m["eth_mean"])
+        vote = "IPA" if di < de else "ETH"
+        feat_votes.append((key, m["cohen_d"], z, m["ipa_mean"], m["eth_mean"], vote))
+    # --- 콘솔 진단 출력 (판정마다 1회) ---
+    try:
+        print("\n[물혼합 진단] 판정={}  (IPA {}% / ETH {}%)".format(winner, out["IPA"], out["ETHANOL"]), flush=True)
+        print("  prototype(중심): IPA_d={:.2f} ETH_d={:.2f}  ->  IPA {}% / ETH {}%".format(
+            proto_ipa_dist, proto_eth_dist, proto_pct["IPA"], proto_pct["ETHANOL"]), flush=True)
+        print("  knn(k={}):                          ->  IPA {}% / ETH {}%".format(
+            k, knn_pct["IPA"], knn_pct["ETHANOL"]), flush=True)
+        print("  가까운 이웃 5개 (어느 라벨에 끌렸나):", flush=True)
+        for i, (d, lab, sid) in enumerate(neighbors[:5], 1):
+            print("    {}. {:14s} d={:.2f}  id={}".format(i, lab, d, sid), flush=True)
+        print("  분리기여 top feature  [측정값z / IPA중심 / ETH중심 / 투표]:", flush=True)
+        for key, cd, z, im, em, vote in feat_votes:
+            print("    {:22s} d={:.2f}  z={:+.2f}  IPA={:+.2f} ETH={:+.2f}  -> {}".format(
+                key, cd, z, im, em, vote), flush=True)
+        iv = sum(1 for *_, v in feat_votes if v == "IPA")
+        print("  top8 feature 투표: IPA {} / ETH {}".format(iv, len(feat_votes) - iv), flush=True)
+    except Exception:
+        pass
     debug = {
         "proto_ipa_dist": round(proto_ipa_dist, 4),
         "proto_eth_dist": round(proto_eth_dist, 4),
@@ -1233,10 +1265,12 @@ def classify_water_mix_dynamic_distance(feature):
         "proto_eth_pct": proto_pct["ETHANOL"],
         "knn_ipa_pct": knn_pct["IPA"],
         "knn_eth_pct": knn_pct["ETHANOL"],
+        "neighbors": [(round(d, 3), lab) for d, lab, _ in neighbors[:5]],
     }
-    for idx, (key, m) in enumerate(top, 1):
+    for idx, (key, cd, z, im, em, vote) in enumerate(feat_votes[:6], 1):
         debug[f"top{idx}"] = key
-        debug[f"top{idx}_d"] = round(m["cohen_d"], 2)
+        debug[f"top{idx}_d"] = round(cd, 2)
+        debug[f"top{idx}_vote"] = vote
     return out, winner, counts, debug
 def is_water_mix_region(feature):
     hum_max_delta = to_float(feature.get("hum_max_delta", 0))
