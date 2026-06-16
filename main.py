@@ -1377,6 +1377,9 @@ def adjust_for_water_mixed_ipa(feature, pct):
     rs_late_ratio_5_10 = to_float(feature.get("rs_late_ratio_5_10", 0))
     rs_hum_ratio_2s = to_float(feature.get("rs_hum_ratio_2s", 0))
     rs_hum_ratio_4s = to_float(feature.get("rs_hum_ratio_4s", 0))
+    early_gas_per_hum_4s = to_float(feature.get("early_gas_per_hum_4s", 0))
+    hum_gas_ratio_8s = to_float(feature.get("hum_gas_ratio_8s", 0))
+    late_gas_per_hum = to_float(feature.get("late_gas_per_hum", 0))
     reaction_offset_sec = to_float(feature.get("reaction_offset_sec", 0))
     reaction_duration_sec = to_float(feature.get("reaction_duration_sec", 0))
     duration_sec = to_float(feature.get("duration_sec", 0))
@@ -1508,6 +1511,22 @@ def adjust_for_water_mixed_ipa(feature, pct):
             ipa += 8.0
         if rs_gas_ratio_4s >= 0.66 and rs_late_ratio_5_10 < 0.30 and not ipa_water_strong:
             eth += 7.0
+        # [수정6] 가스/습도 비율 패턴 보조 점수 (Cohen's d 1.2~1.5 — 3번째 강한 피처군)
+        # early_gas_per_hum_4s: 초반 4초 가스하락/습도상승 비율 — IPA가 더 크다
+        if early_gas_per_hum_4s > 3.11:
+            ipa += 8.0
+        elif early_gas_per_hum_4s < 1.21:
+            eth += 8.0
+        # hum_gas_ratio_8s: 8초 누적 습도상승/가스하락 비율 — IPA가 더 작다
+        if hum_gas_ratio_8s < 0.88:
+            ipa += 8.0
+        elif hum_gas_ratio_8s > 1.12:
+            eth += 8.0
+        # late_gas_per_hum: 후반 가스하락/습도상승 비율 — IPA가 더 크다
+        if late_gas_per_hum > 1.13:
+            ipa += 6.0
+        elif late_gas_per_hum < 0.90:
+            eth += 6.0
         # reaction_start가 너무 늦거나 짧으면 과신하지 않게 보정폭을 줄이는 방향으로 살짝 중앙으로 당김.
         unreliable_rs = reaction_offset_sec > 4.0 or (reaction_duration_sec > 0 and reaction_duration_sec < 5.5)
         if unreliable_rs:
